@@ -41,7 +41,9 @@ my-ai-agent = { tag = "0.1.0", git = "https://github.com/my-ai-utils/my-ai-agent
 
 flurl = { tag = "0.6.1", git = "https://github.com/MyJetTools/fl-url.git", features = [
     "with-ssh",
-], optional = true }
+] }
+
+mcp-server-middleware = { branch = "main", git = "https://github.com/my-ai-utils/mcp-server-middleware.git" }
 
 
 [build-dependencies]

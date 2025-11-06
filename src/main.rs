@@ -6,8 +6,6 @@ mod mcp_service;
 mod postgres;
 mod settings;
 
-mod mcp_middleware;
-
 #[tokio::main]
 async fn main() {
     let settings_file_name = format!("~/.{}", env!("CARGO_PKG_NAME"));

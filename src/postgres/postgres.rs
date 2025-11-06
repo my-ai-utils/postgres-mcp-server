@@ -21,7 +21,7 @@ impl PostgresAccess {
         }
     }
 
-    pub async fn do_request(&self, sql: String) -> String {
+    pub async fn do_request(&self, sql: String) -> Result<String, String> {
         let sql_data = SqlData {
             sql: sql.to_string(),
             values: SqlValues::Empty,
@@ -38,7 +38,7 @@ impl PostgresAccess {
                 },
             )
             .await
-            .unwrap();
+            .map_err(|err| format!("{:?}", err))?;
 
         let mut result = my_json5::json_writer::JsonArrayWriter::new();
 
@@ -46,7 +46,7 @@ impl PostgresAccess {
             result = result.write(itm.into_json_value());
         }
 
-        result.build()
+        Ok(result.build())
     }
 }
 

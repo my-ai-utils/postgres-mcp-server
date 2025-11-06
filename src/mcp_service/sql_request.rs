@@ -3,7 +3,8 @@ use std::sync::Arc;
 use my_ai_agent::{ToolDefinition, macros::ApplyJsonSchema};
 use serde::*;
 
-use crate::{app::AppContext, mcp_middleware::McpService};
+use crate::app::AppContext;
+use mcp_server_middleware::McpService;
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct SqlRequestToolCallRequest {
@@ -40,7 +41,7 @@ impl McpService<SqlRequestToolCallRequest, SqlRequestToolCallResponse> for Postg
     ) -> Result<SqlRequestToolCallResponse, String> {
         println!("Executing Mcp with params: {:?}", model);
 
-        let response = self.app.postgres.do_request(model.sql_request).await;
+        let response = self.app.postgres.do_request(model.sql_request).await?;
 
         Ok(SqlRequestToolCallResponse {
             sql_response_as_json: response,

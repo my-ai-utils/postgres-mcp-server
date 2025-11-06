@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use mcp_server_middleware::McpMiddleware;
 use my_http_server::{HttpConnectionsCounter, MyHttpServer, StaticFilesMiddleware};
 
 use crate::{app::AppContext, mcp_service::PostgresMcpService};
@@ -7,7 +8,7 @@ use crate::{app::AppContext, mcp_service::PostgresMcpService};
 pub async fn setup_server(app: &Arc<AppContext>) -> HttpConnectionsCounter {
     let mut http_server = MyHttpServer::new(SocketAddr::from(([0, 0, 0, 0], 8005)));
 
-    let mut mcp_middleware = crate::mcp_middleware::McpMiddleware::new(
+    let mut mcp_middleware = McpMiddleware::new(
         "/postgres",
         "Postgres MCP Server",
         "0.1.0",
