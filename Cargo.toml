@@ -42,3 +42,7 @@ my-ai-agent = { tag = "0.1.0", git = "https://github.com/my-ai-utils/my-ai-agent
 flurl = { tag = "0.6.1", git = "https://github.com/MyJetTools/fl-url.git", features = [
     "with-ssh",
 ], optional = true }
+
+
+[build-dependencies]
+ci-utils = { git = "https://github.com/MyJetTools/ci-utils.git", tag = "0.1.3" }
