@@ -1,0 +1,180 @@
+---
+alwaysApply: true
+---
+
+# Postgres MCP Server - Prototype Description
+
+## Overview
+
+This is a Rust-based HTTP server prototype designed to serve as a Model Context Protocol (MCP) server. The application is built using the Tokio async runtime and follows a modular architecture pattern with a focus on extensible middleware-based request handling.
+
+## Core Architecture
+
+### Entry Point (`main.rs`)
+
+The application entry point initializes the core components:
+
+1. **Settings Loading**: Reads configuration from a settings file using the `SettingsReader` (path derived from package name)
+2. **Application Context Creation**: Initializes the `AppContext` with loaded settings
+3. **HTTP Server Setup**: Configures and starts the HTTP server
+4. **Graceful Shutdown**: Waits for shutdown signal using `app_states.wait_until_shutdown()`
+
+```12:25:src/main.rs
+async fn main() {
+    let settings_file_name = format!("~/.{}", env!("CARGO_PKG_NAME"));
+    let settings = crate::settings::SettingsReader::new(settings_file_name.as_str()).await;
+
+    let settings = Arc::new(settings);
+
+    let app_ctx = crate::app::AppContext::new(settings).await;
+
+    let app_ctx = Arc::new(app_ctx);
+
+    crate::http_server::setup_server(&app_ctx).await;
+
+    app_ctx.app_states.wait_until_shutdown().await;
+}
+```
+
+### Application Context (`app/app_ctx.rs`)
+
+The `AppContext` serves as the central application state container:
+
+- **App States**: Manages application lifecycle states (initialization, running, shutdown)
+- **Shared State**: Uses `Arc` for thread-safe sharing across async tasks
+- **Initialization**: Creates initialized `AppStates` and sets up required services
+- **Service Integration**: Provides a structure for integrating various services through the application context
+
+```7:19:src/app/app_ctx.rs
+pub struct AppContext {
+    pub app_states: Arc<AppStates>,
+    pub postgres: crate::postgres::PostgresAccess,
+}
+
+impl AppContext {
+    pub async fn new(settings: Arc<crate::settings::SettingsReader>) -> Self {
+        Self {
+            app_states: Arc::new(AppStates::create_initialized()),
+            postgres: crate::postgres::PostgresAccess::new(settings).await,
+        }
+    }
+}
+```
+
+### HTTP Server (`http_server/startup.rs`)
+
+The HTTP server setup module configures the web server:
+
+- **Server Binding**: Listens on `0.0.0.0:8005`
+- **Middleware Registration**: Sets up middleware chain for request processing
+- **Static Files**: Configures static file serving middleware
+- **Connection Management**: Returns connection counter for monitoring
+- **Extensible Architecture**: Designed to support custom middleware registration
+
+```7:29:src/http_server/startup.rs
+pub async fn setup_server(app: &Arc<AppContext>) -> HttpConnectionsCounter {
+    let mut http_server = MyHttpServer::new(SocketAddr::from(([0, 0, 0, 0], 8005)));
+
+    let mut mcp_middleware = crate::mcp_middleware::McpMiddleware::new(
+        "/postgres",
+        "Postgres MCP Server",
+        "0.1.0",
+        "You can use this server to query your Postgres database",
+    );
+    mcp_middleware
+        .register_tool_call(Arc::new(PostgresMcpService::new(app.clone())))
+        .await;
+
+    let mcp_middleware = Arc::new(mcp_middleware);
+
+    http_server.add_middleware(mcp_middleware);
+
+    http_server.add_middleware(Arc::new(StaticFilesMiddleware::new(None, None)));
+
+    http_server.start(app.app_states.clone(), my_logger::LOGGER.clone());
+
+    http_server.get_http_connections_counter()
+}
+```
+
+### Settings Management (`settings.rs`)
+
+The settings module provides configuration management:
+
+- **Settings Model**: Defines configuration structure using Serde serialization
+- **Async Configuration**: Uses async trait for settings access
+- **Trait Implementation**: Implements required traits for integration with other components
+
+```4:15:src/settings.rs
+#[derive(Debug, Serialize, Deserialize, Clone, my_settings_reader::SettingsModel)]
+pub struct SettingsModel {
+    pub postgres_url: String,
+}
+
+#[async_trait::async_trait]
+impl PostgresSettings for SettingsReader {
+    async fn get_connection_string(&self) -> String {
+        let read_access = self.settings.read().await;
+        read_access.postgres_url.clone()
+    }
+}
+```
+
+## Dependencies
+
+The project relies on several custom and standard Rust crates:
+
+- **Tokio**: Async runtime with full features
+- **my-http-server**: Custom HTTP server framework with middleware support
+- **my-settings-reader**: Configuration management
+- **my-logger**: Logging infrastructure
+- **my-json**: JSON serialization utilities
+- **my-ai-agent**: AI agent framework integration
+- **serde/serde_json**: Serialization support
+- **rust-extensions**: Utility extensions for Rust applications
+
+## Architecture Patterns
+
+1. **Arc-based Sharing**: Uses `Arc` for thread-safe shared state across async boundaries
+2. **Dependency Injection**: Settings and context passed through constructors
+3. **Middleware Pattern**: HTTP server uses middleware chain for request processing
+4. **Async/Await**: Full async/await pattern throughout the application
+5. **Graceful Shutdown**: Uses `AppStates` for coordinated shutdown
+
+## Module Structure
+
+```
+src/
+├── main.rs              # Application entry point
+├── app/                 # Application context and state
+│   ├── mod.rs
+│   └── app_ctx.rs
+├── http_server/         # HTTP server configuration
+│   ├── mod.rs
+│   └── startup.rs
+├── settings.rs          # Configuration management
+├── mcp_middleware/      # [Excluded from description]
+├── mcp_service/         # [Excluded from description]
+└── postgres/            # [Excluded from description]
+```
+
+## Configuration
+
+The application expects configuration files in a location derived from the package name (e.g., `~/.postgres-mcp-server`). The settings structure is defined by the `SettingsModel` struct and can be extended as needed.
+
+## Server Configuration
+
+The server listens on port `8005` and is configured to handle:
+- HTTP requests through a middleware chain
+- Static file serving
+- Extensible middleware architecture for custom request handling
+
+## Architecture Highlights
+
+1. **Modular Design**: Clear separation of concerns with dedicated modules for application context, HTTP server setup, and configuration
+2. **Async-First**: Built entirely on async/await patterns using Tokio runtime
+3. **Thread-Safe State**: Uses `Arc` for shared state management across async boundaries
+4. **Middleware Pattern**: Extensible HTTP server architecture supporting custom middleware
+5. **Graceful Shutdown**: Coordinated shutdown mechanism through `AppStates`
+6. **Configuration Management**: Centralized settings management with async access patterns
+
