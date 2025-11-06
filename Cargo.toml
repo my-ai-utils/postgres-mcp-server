@@ -25,7 +25,7 @@ my-postgres = { tag = "0.5.6", git = "https://github.com/MyJetTools/my-postgres.
     "with-ssh",
 ] }
 
-my-json = { tag = "0.3.2", git = "https://github.com/MyJetTools/my-json.git" }
+my-json5 = { tag = "0.1.0", git = "https://github.com/MyJetTools/my-json5.git" }
 
 
 serde = { version = "1.0", features = ["derive"] }

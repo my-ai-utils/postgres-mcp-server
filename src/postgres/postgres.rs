@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use my_json::json_writer::RawJsonObject;
+use my_json5::json_writer::RawJsonObject;
 use my_postgres::{
     MyPostgres, RequestContext,
     sql::{SqlData, SqlValues},
@@ -40,7 +40,7 @@ impl PostgresAccess {
             .await
             .unwrap();
 
-        let mut result = my_json::json_writer::JsonArrayWriter::new();
+        let mut result = my_json5::json_writer::JsonArrayWriter::new();
 
         for itm in items {
             result = result.write(itm.into_json_value());
@@ -62,7 +62,7 @@ impl SqlResponse {
 
 impl SelectEntity for SqlResponse {
     fn from(row: &my_postgres::tokio_postgres::Row) -> Self {
-        let mut result = my_json::json_writer::JsonObjectWriter::new();
+        let mut result = my_json5::json_writer::JsonObjectWriter::new();
         let mut index = 0;
         for column in row.columns() {
             index += 1;
