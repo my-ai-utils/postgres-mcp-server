@@ -40,83 +40,75 @@ impl PostgresAccess {
             .await
             .map_err(|err| format!("{:?}", err))?;
 
-        let mut result = my_json5::json_writer::JsonArrayWriter::new();
-
-        for itm in items {
-            result = result.write(itm.into_json_value());
+        let mut columns_arr = my_json5::json_writer::JsonArrayWriter::new();
+        if let Some(first) = items.first() {
+            for c in &first.columns {
+                columns_arr = columns_arr.write(c.as_str());
+            }
         }
+
+        let mut rows_arr = my_json5::json_writer::JsonArrayWriter::new();
+        for itm in items {
+            rows_arr = rows_arr.write(RawJsonObject::AsString(itm.values_json));
+        }
+
+        let result = my_json5::json_writer::JsonObjectWriter::new()
+            .write("columns", RawJsonObject::AsString(columns_arr.build()))
+            .write("rows", RawJsonObject::AsString(rows_arr.build()));
 
         Ok(result.build())
     }
 }
 
 pub struct SqlResponse {
-    result: String,
-}
-
-impl SqlResponse {
-    pub fn into_json_value(self) -> RawJsonObject<'static> {
-        RawJsonObject::AsString(self.result)
-    }
+    columns: Vec<String>,
+    values_json: String,
 }
 
 impl SelectEntity for SqlResponse {
     fn from(row: &my_postgres::tokio_postgres::Row) -> Self {
-        let mut result = my_json5::json_writer::JsonObjectWriter::new();
-        let mut index = 0;
-        for column in row.columns() {
-            index += 1;
-            let name = column.name();
+        let mut columns = Vec::with_capacity(row.columns().len());
+        let mut values = my_json5::json_writer::JsonArrayWriter::new();
 
-            let value: Result<i8, my_postgres::tokio_postgres::Error> = row.try_get(index - 1);
-            if let Ok(value) = value {
-                result = result.write(name, value);
+        for (index, column) in row.columns().iter().enumerate() {
+            columns.push(column.name().to_string());
+
+            if let Ok(v) = row.try_get::<_, i8>(index) {
+                values = values.write(v);
+                continue;
+            }
+            if let Ok(v) = row.try_get::<_, i16>(index) {
+                values = values.write(v);
+                continue;
+            }
+            if let Ok(v) = row.try_get::<_, i32>(index) {
+                values = values.write(v);
+                continue;
+            }
+            if let Ok(v) = row.try_get::<_, i64>(index) {
+                values = values.write(v);
+                continue;
+            }
+            if let Ok(v) = row.try_get::<_, f32>(index) {
+                values = values.write(v);
+                continue;
+            }
+            if let Ok(v) = row.try_get::<_, f64>(index) {
+                values = values.write(v);
+                continue;
+            }
+            if let Ok(v) = row.try_get::<_, bool>(index) {
+                values = values.write(v);
                 continue;
             }
 
-            let value: Result<i16, my_postgres::tokio_postgres::Error> = row.try_get(index - 1);
-            if let Ok(value) = value {
-                result = result.write(name, value);
-                continue;
-            }
-
-            let value: Result<i32, my_postgres::tokio_postgres::Error> = row.try_get(index - 1);
-            if let Ok(value) = value {
-                result = result.write(name, value);
-                continue;
-            }
-
-            let value: Result<i64, my_postgres::tokio_postgres::Error> = row.try_get(index - 1);
-            if let Ok(value) = value {
-                result = result.write(name, value);
-                continue;
-            }
-
-            let value: Result<f32, my_postgres::tokio_postgres::Error> = row.try_get(index - 1);
-            if let Ok(value) = value {
-                result = result.write(name, value);
-                continue;
-            }
-
-            let value: Result<f64, my_postgres::tokio_postgres::Error> = row.try_get(index - 1);
-            if let Ok(value) = value {
-                result = result.write(name, value);
-                continue;
-            }
-
-            let value: Result<bool, my_postgres::tokio_postgres::Error> = row.try_get(index - 1);
-            if let Ok(value) = value {
-                result = result.write(name, value);
-                continue;
-            }
-
-            let value: String = row.get(index - 1);
-
-            result = result.write(name, value);
+            let v: String = row.get(index);
+            values = values.write(v);
         }
 
         Self {
-            result: result.build(),
+            columns,
+            values_json: values.build(),
         }
     }
 

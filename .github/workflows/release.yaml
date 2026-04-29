@@ -10,8 +10,8 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.2
         with:
           toolchain: stable
 
@@ -22,11 +22,12 @@ jobs:
       - name: Updating version
         run: sed -i -e 's/^version = .*/version = "${{ steps.get_version.outputs.VERSION }}"/' Cargo.toml
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v1            
-      - run: |
+
+      - name: Build
+        run: |
           export GIT_HUB_TOKEN="${{ secrets.PUBLISH_TOKEN }}"
           cargo build --release
+
 
       - name: Docker login
         run: |          

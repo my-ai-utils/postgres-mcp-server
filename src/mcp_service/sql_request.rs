@@ -4,7 +4,7 @@ use my_ai_agent::{ToolDefinition, macros::ApplyJsonSchema};
 use serde::*;
 
 use crate::app::AppContext;
-use mcp_server_middleware::McpService;
+use mcp_server_middleware::McpToolCall;
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct SqlRequestToolCallRequest {
@@ -34,7 +34,7 @@ impl ToolDefinition for PostgresMcpService {
 }
 
 #[async_trait::async_trait]
-impl McpService<SqlRequestToolCallRequest, SqlRequestToolCallResponse> for PostgresMcpService {
+impl McpToolCall<SqlRequestToolCallRequest, SqlRequestToolCallResponse> for PostgresMcpService {
     async fn execute_tool_call(
         &self,
         model: SqlRequestToolCallRequest,

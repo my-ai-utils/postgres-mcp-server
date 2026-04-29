@@ -9,7 +9,7 @@ pub async fn setup_server(app: &Arc<AppContext>) -> HttpConnectionsCounter {
     let mut http_server = MyHttpServer::new(SocketAddr::from(([0, 0, 0, 0], 8005)));
 
     let mut mcp_middleware = McpMiddleware::new(
-        "/postgres",
+        "/mcp",
         "Postgres MCP Server",
         "0.1.0",
         "You can use this server to query your Postgres database",
@@ -22,7 +22,7 @@ pub async fn setup_server(app: &Arc<AppContext>) -> HttpConnectionsCounter {
 
     http_server.add_middleware(mcp_middleware);
 
-    http_server.add_middleware(Arc::new(StaticFilesMiddleware::new(None, None)));
+    http_server.add_middleware(Arc::new(StaticFilesMiddleware::new()));
 
     http_server.start(app.app_states.clone(), my_logger::LOGGER.clone());
 
