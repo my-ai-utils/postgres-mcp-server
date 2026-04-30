@@ -6,7 +6,7 @@ use my_http_server::{HttpConnectionsCounter, MyHttpServer, StaticFilesMiddleware
 use crate::{app::AppContext, mcp_service::PostgresMcpService};
 
 pub async fn setup_server(app: &Arc<AppContext>) -> HttpConnectionsCounter {
-    let mut http_server = MyHttpServer::new(SocketAddr::from(([0, 0, 0, 0], 8005)));
+    let mut http_server = MyHttpServer::new(SocketAddr::from(([0, 0, 0, 0], 8000)));
 
     let mut mcp_middleware = McpMiddleware::new(
         "/mcp",
