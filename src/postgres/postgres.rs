@@ -1,10 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use my_json5::json_writer::RawJsonObject;
+use my_json5::json_writer::{JsonArrayWriter, RawJsonObject};
 use my_postgres::{
     MyPostgres, RequestContext,
     sql::{SqlData, SqlValues},
     sql_select::SelectEntity,
+    tokio_postgres::{Row, types::Type},
 };
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
@@ -72,62 +73,7 @@ impl SelectEntity for SqlResponse {
 
         for (index, column) in row.columns().iter().enumerate() {
             columns.push(column.name().to_string());
-
-            if let Ok(v) = row.try_get::<_, Option<i8>>(index) {
-                match v {
-                    Some(v) => values = values.write(v),
-                    None => values = values.write_null_element(),
-                }
-                continue;
-            }
-            if let Ok(v) = row.try_get::<_, Option<i16>>(index) {
-                match v {
-                    Some(v) => values = values.write(v),
-                    None => values = values.write_null_element(),
-                }
-                continue;
-            }
-            if let Ok(v) = row.try_get::<_, Option<i32>>(index) {
-                match v {
-                    Some(v) => values = values.write(v),
-                    None => values = values.write_null_element(),
-                }
-                continue;
-            }
-            if let Ok(v) = row.try_get::<_, Option<i64>>(index) {
-                match v {
-                    Some(v) => values = values.write(v),
-                    None => values = values.write_null_element(),
-                }
-                continue;
-            }
-            if let Ok(v) = row.try_get::<_, Option<f32>>(index) {
-                match v {
-                    Some(v) => values = values.write(v),
-                    None => values = values.write_null_element(),
-                }
-                continue;
-            }
-            if let Ok(v) = row.try_get::<_, Option<f64>>(index) {
-                match v {
-                    Some(v) => values = values.write(v),
-                    None => values = values.write_null_element(),
-                }
-                continue;
-            }
-            if let Ok(v) = row.try_get::<_, Option<bool>>(index) {
-                match v {
-                    Some(v) => values = values.write(v),
-                    None => values = values.write_null_element(),
-                }
-                continue;
-            }
-
-            match row.try_get::<_, Option<String>>(index) {
-                Ok(Some(v)) => values = values.write(v),
-                Ok(None) => values = values.write_null_element(),
-                Err(_) => values = values.write_null_element(),
-            }
+            values = write_value(values, row, index, column.type_());
         }
 
         Self {
@@ -145,4 +91,61 @@ impl SelectEntity for SqlResponse {
     fn get_group_by_fields() -> Option<&'static str> {
         None
     }
+}
+
+fn write_value(values: JsonArrayWriter, row: &Row, index: usize, ty: &Type) -> JsonArrayWriter {
+    macro_rules! direct {
+        ($t:ty) => {
+            match row.try_get::<_, Option<$t>>(index) {
+                Ok(Some(v)) => values.write(v),
+                _ => values.write_null_element(),
+            }
+        };
+    }
+    macro_rules! as_string {
+        ($t:ty, |$v:ident| $body:expr) => {
+            match row.try_get::<_, Option<$t>>(index) {
+                Ok(Some($v)) => values.write($body),
+                _ => values.write_null_element(),
+            }
+        };
+    }
+
+    match *ty {
+        Type::BOOL => direct!(bool),
+        Type::INT2 => direct!(i16),
+        Type::INT4 => direct!(i32),
+        Type::INT8 => direct!(i64),
+        Type::OID => as_string!(u32, |v| v as i64),
+        Type::FLOAT4 => direct!(f32),
+        Type::FLOAT8 => direct!(f64),
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => direct!(String),
+        Type::UUID => as_string!(uuid::Uuid, |v| v.to_string()),
+        Type::TIMESTAMP => {
+            as_string!(chrono::NaiveDateTime, |v| v
+                .format("%Y-%m-%dT%H:%M:%S%.f")
+                .to_string())
+        }
+        Type::TIMESTAMPTZ => {
+            as_string!(chrono::DateTime<chrono::Utc>, |v| v.to_rfc3339())
+        }
+        Type::DATE => as_string!(chrono::NaiveDate, |v| v.to_string()),
+        Type::TIME => as_string!(chrono::NaiveTime, |v| v.to_string()),
+        Type::JSON | Type::JSONB => match row.try_get::<_, Option<serde_json::Value>>(index) {
+            Ok(Some(v)) => values.write(RawJsonObject::AsString(v.to_string())),
+            _ => values.write_null_element(),
+        },
+        Type::BYTEA => as_string!(Vec<u8>, |v| bytes_to_hex(&v)),
+        _ => values.write(format!("[unsupported pg type: {}]", ty.name())),
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(2 + bytes.len() * 2);
+    s.push_str("\\x");
+    for b in bytes {
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
 }
