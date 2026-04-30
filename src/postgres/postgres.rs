@@ -73,37 +73,61 @@ impl SelectEntity for SqlResponse {
         for (index, column) in row.columns().iter().enumerate() {
             columns.push(column.name().to_string());
 
-            if let Ok(v) = row.try_get::<_, i8>(index) {
-                values = values.write(v);
+            if let Ok(v) = row.try_get::<_, Option<i8>>(index) {
+                match v {
+                    Some(v) => values = values.write(v),
+                    None => values = values.write_null_element(),
+                }
                 continue;
             }
-            if let Ok(v) = row.try_get::<_, i16>(index) {
-                values = values.write(v);
+            if let Ok(v) = row.try_get::<_, Option<i16>>(index) {
+                match v {
+                    Some(v) => values = values.write(v),
+                    None => values = values.write_null_element(),
+                }
                 continue;
             }
-            if let Ok(v) = row.try_get::<_, i32>(index) {
-                values = values.write(v);
+            if let Ok(v) = row.try_get::<_, Option<i32>>(index) {
+                match v {
+                    Some(v) => values = values.write(v),
+                    None => values = values.write_null_element(),
+                }
                 continue;
             }
-            if let Ok(v) = row.try_get::<_, i64>(index) {
-                values = values.write(v);
+            if let Ok(v) = row.try_get::<_, Option<i64>>(index) {
+                match v {
+                    Some(v) => values = values.write(v),
+                    None => values = values.write_null_element(),
+                }
                 continue;
             }
-            if let Ok(v) = row.try_get::<_, f32>(index) {
-                values = values.write(v);
+            if let Ok(v) = row.try_get::<_, Option<f32>>(index) {
+                match v {
+                    Some(v) => values = values.write(v),
+                    None => values = values.write_null_element(),
+                }
                 continue;
             }
-            if let Ok(v) = row.try_get::<_, f64>(index) {
-                values = values.write(v);
+            if let Ok(v) = row.try_get::<_, Option<f64>>(index) {
+                match v {
+                    Some(v) => values = values.write(v),
+                    None => values = values.write_null_element(),
+                }
                 continue;
             }
-            if let Ok(v) = row.try_get::<_, bool>(index) {
-                values = values.write(v);
+            if let Ok(v) = row.try_get::<_, Option<bool>>(index) {
+                match v {
+                    Some(v) => values = values.write(v),
+                    None => values = values.write_null_element(),
+                }
                 continue;
             }
 
-            let v: String = row.get(index);
-            values = values.write(v);
+            match row.try_get::<_, Option<String>>(index) {
+                Ok(Some(v)) => values = values.write(v),
+                Ok(None) => values = values.write_null_element(),
+                Err(_) => values = values.write_null_element(),
+            }
         }
 
         Self {
