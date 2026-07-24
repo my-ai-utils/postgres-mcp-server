@@ -1,0 +1,4 @@
+# The root .gitignore's `/target` is anchored to the repo root and does not
+# cover this nested crate's build output.
+/target
+Cargo.lock

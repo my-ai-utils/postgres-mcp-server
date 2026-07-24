@@ -1,0 +1,109 @@
+/* === Requests page: data table + settings rows === */
+
+/* --- Data table (SQL requests card) --- */
+.dt {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.dt thead th {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-align: left;
+    padding: 8px 14px;
+    background: var(--bg-sunken);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.dt tbody td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    vertical-align: middle;
+}
+
+.dt tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.dt tbody tr:hover {
+    background: var(--bg-hover);
+}
+
+.dt tbody tr:nth-child(even) {
+    background: var(--bg-row-alt);
+}
+
+.dt tbody tr:nth-child(even):hover {
+    background: var(--bg-hover);
+}
+
+.dt .mono {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+}
+
+.dt .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.dt thead th.num {
+    text-align: right;
+}
+
+.dt-ellipsis {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+    vertical-align: middle;
+}
+
+.dt__empty {
+    color: var(--text-muted);
+    text-align: center;
+    padding: 18px 14px;
+}
+
+/* --- Settings row (label + field) ---
+   These classes are referenced by the "Write access" card. The reference UI
+   uses the same class names but never defines them, so they render as bare
+   blocks there; the rules below are the real implementation. */
+.settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.settings-row__label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text);
+}
+
+.settings-row__field {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.settings-row__unit {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}

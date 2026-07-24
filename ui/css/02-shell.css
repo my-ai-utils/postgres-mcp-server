@@ -1,0 +1,92 @@
+/* === App shell: topbar + page (single page — no sidebar) === */
+
+.shell {
+    display: grid;
+    grid-template-rows: var(--topbar-h) 1fr;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--bg);
+}
+
+/* --- Topbar --- */
+.topbar {
+    display: flex;
+    align-items: center;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev);
+    gap: 14px;
+}
+
+.topbar__brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+}
+
+.topbar__logo {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
+    color: #fff;
+    font-weight: 700;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.topbar__brand-name {
+    font-weight: 600;
+    font-size: 14px;
+    line-height: 1.1;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.topbar__actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.topbar__icon-btn {
+    width: 32px;
+    height: 32px;
+    border: 1px solid transparent;
+    background: transparent;
+    border-radius: var(--r-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    transition: background 0.12s ease, color 0.12s ease;
+}
+
+.topbar__icon-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+}
+
+.topbar__icon-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* --- Page --- */
+.page {
+    overflow: auto;
+    min-height: 0;
+    min-width: 0;
+}
+
+.page--padded {
+    padding: 18px;
+}

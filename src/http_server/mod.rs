@@ -1,2 +1,3 @@
+mod controllers;
 mod startup;
 pub use startup::*;

@@ -5,6 +5,8 @@ mod http_server;
 mod mcp_service;
 mod postgres;
 mod settings;
+mod sql_guard;
+mod sql_log;
 
 #[tokio::main]
 async fn main() {

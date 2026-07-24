@@ -1,0 +1,22 @@
+[application]
+name = "postgres-mcp-ui"
+default_platform = "web"
+asset_dir = "assets"
+
+[web.app]
+title = "Postgres MCP Server"
+
+[web.watcher]
+reload_html = false
+index_on_404 = true
+
+# No Google Fonts <link> on purpose: this server may run on a private or
+# air-gapped host, where a blocking font request would stall first paint.
+# The `--font-sans` / `--font-mono` tokens fall back to system-ui and
+# SFMono-Regular / Menlo / Consolas.
+[web.resource]
+style = ["/assets/app.css"]
+script = []
+
+[web.resource.dev]
+script = []

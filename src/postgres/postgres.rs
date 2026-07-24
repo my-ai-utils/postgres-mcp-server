@@ -13,6 +13,15 @@ pub struct PostgresAccess {
     postgres: MyPostgres,
 }
 
+/// The rendered JSON plus the row count, which the caller records in the
+/// requests log. `execute_sql_as_vec` goes through the extended protocol
+/// (`connection.query`), so a write without `RETURNING` comes back as an empty
+/// vec — `rows` is "rows returned", never "rows affected".
+pub struct SqlResponseResult {
+    pub json: String,
+    pub rows: usize,
+}
+
 impl PostgresAccess {
     pub async fn new(settings: Arc<crate::settings::SettingsReader>) -> Self {
         Self {
@@ -22,7 +31,7 @@ impl PostgresAccess {
         }
     }
 
-    pub async fn do_request(&self, sql: String) -> Result<String, String> {
+    pub async fn do_request(&self, sql: String) -> Result<SqlResponseResult, String> {
         let sql_data = SqlData {
             sql: sql.to_string(),
             values: SqlValues::Empty,
@@ -48,6 +57,8 @@ impl PostgresAccess {
             }
         }
 
+        let rows = items.len();
+
         let mut rows_arr = my_json5::json_writer::JsonArrayWriter::new();
         for itm in items {
             rows_arr = rows_arr.write(RawJsonObject::AsString(itm.values_json));
@@ -57,7 +68,10 @@ impl PostgresAccess {
             .write("columns", RawJsonObject::AsString(columns_arr.build()))
             .write("rows", RawJsonObject::AsString(rows_arr.build()));
 
-        Ok(result.build())
+        Ok(SqlResponseResult {
+            json: result.build(),
+            rows,
+        })
     }
 }
 
