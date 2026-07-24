@@ -1,5 +1,5 @@
 use my_http_server::macros::*;
-use my_http_server::types::RawDataTyped;
+use my_http_server::RawDataTyped;
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppContext;
@@ -11,10 +11,9 @@ use crate::app::AppContext;
 pub struct SettingsPublicModel {
     #[serde(rename = "mcpWritesEnabled")]
     pub mcp_writes_enabled: bool,
-    #[serde(
-        rename = "mcpWritesRemainingSecs",
-        skip_serializing_if = "Option::is_none"
-    )]
+    // `null` while writes are disabled — `MyHttpObjectStructure` rejects
+    // `skip_serializing_if`, and the UI mirror reads it as `Option` anyway.
+    #[serde(rename = "mcpWritesRemainingSecs")]
     pub mcp_writes_remaining_secs: Option<u64>,
 }
 

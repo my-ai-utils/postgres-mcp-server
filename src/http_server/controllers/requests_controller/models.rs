@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::sql_log::{SqlLogItem, SqlRequestStatus};
 
-/// One row of the requests table. Optional fields are omitted rather than
-/// nulled, so the UI's `Option` + `#[serde(default)]` mirror deserializes the
-/// same whether or not the field applies.
+/// One row of the requests table. Optional fields go on the wire as `null`
+/// when they do not apply — the UI's `Option` + `#[serde(default)]` mirror
+/// reads that the same way as an absent key.
 #[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
 pub struct SqlRequestModel {
     pub id: u64,
@@ -16,13 +16,11 @@ pub struct SqlRequestModel {
     pub kind: String,
     // "ok" | "error" | "blocked"
     pub status: String,
-    // Rows returned — present only when the request succeeded.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Rows returned — non-null only when the request succeeded.
     pub rows: Option<usize>,
-    // Absent for gate-blocked requests: they never ran, so they took no time.
-    #[serde(rename = "tookMicros", skip_serializing_if = "Option::is_none")]
+    // Null for gate-blocked requests: they never ran, so they took no time.
+    #[serde(rename = "tookMicros")]
     pub took_micros: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 

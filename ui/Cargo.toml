@@ -13,9 +13,9 @@ dioxus-utils = { tag = "0.7.0", git = "https://github.com/MyJetTools/dioxus-util
     "web",
 ] }
 
-# HTTP client. Tag 0.7.0 is REQUIRED: it is the first tag with a
-# `cfg(target_arch = "wasm32")` fetch backend, so 0.6.1 does not compile to wasm.
-# Do not downgrade to match the server crate's pin.
+# HTTP client. Tag 0.7.0 or newer is REQUIRED: 0.7.0 is the first tag with a
+# `cfg(target_arch = "wasm32")` fetch backend, so earlier tags do not compile
+# to wasm.
 flurl = { tag = "0.7.0", git = "https://github.com/MyJetTools/fl-url.git" }
 
 serde_json = { version = "*" }

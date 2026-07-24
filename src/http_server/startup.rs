@@ -26,12 +26,8 @@ pub async fn setup_server(app: &Arc<AppContext>) -> HttpConnectionsCounter {
         APP_VERSION,
         "You can use this server to query your Postgres database",
     );
-    mcp_middleware
-        .register_tool_call(Arc::new(PostgresMcpService::new(app.clone())))
-        .await;
-    mcp_middleware
-        .register_prompt(Arc::new(WriteAccessPolicyPromptHandler))
-        .await;
+    mcp_middleware.register_tool_call(Arc::new(PostgresMcpService::new(app.clone())));
+    mcp_middleware.register_prompt(Arc::new(WriteAccessPolicyPromptHandler));
 
     let mcp_middleware = Arc::new(mcp_middleware);
 
