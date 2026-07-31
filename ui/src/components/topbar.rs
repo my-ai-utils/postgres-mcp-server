@@ -3,6 +3,9 @@ use dioxus::prelude::*;
 use crate::components::atoms::{Icon, IconKind, StatePill, StateTone};
 use crate::storage;
 
+/// Same mark as the browser favicon — see `main.rs`.
+const LOGO: Asset = asset!("/public/favicon.svg");
+
 #[component]
 pub fn Topbar(writes_enabled: bool) -> Element {
     let mut theme = use_signal(|| storage::load_theme().unwrap_or_else(|| "light".to_string()));
@@ -30,7 +33,7 @@ pub fn Topbar(writes_enabled: bool) -> Element {
     rsx! {
         header { class: "topbar",
             div { class: "topbar__brand",
-                div { class: "topbar__logo", "P" }
+                img { class: "topbar__logo", src: LOGO, alt: "" }
                 span { class: "topbar__brand-name", "Postgres MCP Server" }
             }
             div { class: "topbar__actions",

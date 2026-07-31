@@ -8,7 +8,9 @@ default = ["web"]
 web = ["dioxus/web"]
 
 [dependencies]
-dioxus = { version = "0.7", features = ["router"] }
+# Keep this in step with the `dx` CLI version — dx refuses to build when the
+# two differ (currently dx 0.7.10).
+dioxus = { version = "0.7.10", features = ["router"] }
 dioxus-utils = { tag = "0.7.0", git = "https://github.com/MyJetTools/dioxus-utils.git", features = [
     "web",
 ] }

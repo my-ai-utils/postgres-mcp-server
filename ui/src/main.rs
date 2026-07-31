@@ -20,7 +20,11 @@ fn main() {
         storage::apply_theme(&theme);
 
         rsx! {
-            document::Link { rel: "icon", href: asset!("/public/favicon.ico") }
+            document::Link {
+                rel: "icon",
+                r#type: "image/svg+xml",
+                href: asset!("/public/favicon.svg"),
+            }
             Router::<AppRoute> {}
         }
     });
