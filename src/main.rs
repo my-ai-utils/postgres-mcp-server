@@ -15,7 +15,21 @@ async fn main() {
 
     let settings = Arc::new(settings);
 
-    let app_ctx = crate::app::AppContext::new(settings).await;
+    // Resolved once, up front: a bad path or a missing connection string has to
+    // stop the boot rather than surface as a dead endpoint later.
+    let mounts = match settings
+        .use_settings(|settings| settings.get_mounts())
+        .await
+    {
+        Ok(mounts) => mounts,
+        Err(err) => panic!("Invalid settings in '{}'. {}", settings_file_name, err),
+    };
+
+    for mount in &mounts {
+        println!("MCP endpoint {} -> {}", mount.path, mount.description);
+    }
+
+    let app_ctx = crate::app::AppContext::new(settings, mounts).await;
 
     let app_ctx = Arc::new(app_ctx);
 

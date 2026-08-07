@@ -3,12 +3,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::sql_log::{SqlLogItem, SqlRequestStatus};
 
-/// One row of the requests table. Optional fields go on the wire as `null`
-/// when they do not apply — the UI's `Option` + `#[serde(default)]` mirror
-/// reads that the same way as an absent key.
+/// One row of the requests table. Optional fields go on the wire as `null` when
+/// they do not apply — never omitted, because the UI mirror declares them as
+/// plain `Option`s and would fail on an absent key.
 #[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
 pub struct SqlRequestModel {
     pub id: u64,
+    // Mount path of the database the request ran against, e.g. "/mcp".
+    pub db: String,
     pub started: String,
     pub sql: String,
     // "read" | "write". No `///` doc-comments on these fields: the
@@ -34,6 +36,7 @@ impl SqlRequestModel {
 
         Self {
             id: src.id,
+            db: src.db_path.as_str().to_string(),
             started: src.started.to_rfc3339(),
             sql: src.sql.clone(),
             kind: if src.is_write { "write" } else { "read" }.to_string(),

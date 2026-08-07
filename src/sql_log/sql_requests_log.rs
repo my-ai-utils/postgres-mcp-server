@@ -14,7 +14,9 @@ const MAX_ITEMS: usize = 100;
 /// shows an ellipsized cell anyway.
 const MAX_SQL_LEN: usize = 4096;
 
-/// In-memory ring buffer of the last [`MAX_ITEMS`] SQL requests.
+/// In-memory ring buffer of the last [`MAX_ITEMS`] SQL requests, across **all**
+/// configured databases — one timeline, each entry tagged with the database it
+/// ran against.
 ///
 /// Written on every request, so this is not a read-mostly structure and ArcSwap
 /// would be the wrong tool — a plain `parking_lot::Mutex` around the container
@@ -36,6 +38,7 @@ impl SqlRequestsLog {
 
     pub fn add(
         &self,
+        db_path: Arc<String>,
         sql: String,
         is_write: bool,
         started: DateTimeAsMicroseconds,
@@ -44,6 +47,7 @@ impl SqlRequestsLog {
     ) {
         let item = Arc::new(SqlLogItem {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            db_path,
             started,
             sql: truncate(sql),
             is_write,
@@ -87,9 +91,14 @@ fn truncate(mut sql: String) -> String {
 mod tests {
     use super::*;
 
+    fn db_path() -> Arc<String> {
+        Arc::new("/mcp".to_string())
+    }
+
     fn add_n(log: &SqlRequestsLog, n: usize) {
         for i in 0..n {
             log.add(
+                db_path(),
                 format!("SELECT {}", i),
                 false,
                 DateTimeAsMicroseconds::now(),
@@ -125,6 +134,7 @@ mod tests {
         let log = SqlRequestsLog::new();
         // Multi-byte chars, so a naive byte truncate would panic.
         log.add(
+            db_path(),
             "😀".repeat(4000),
             false,
             DateTimeAsMicroseconds::now(),
@@ -135,5 +145,25 @@ mod tests {
         let items = log.get_all();
         assert!(items[0].sql.len() <= MAX_SQL_LEN + 4);
         assert!(items[0].sql.ends_with('…'));
+    }
+
+    #[test]
+    fn every_entry_remembers_its_database() {
+        let log = SqlRequestsLog::new();
+
+        for path in ["/mcp", "/mcp-reporting"] {
+            log.add(
+                Arc::new(path.to_string()),
+                "SELECT 1".to_string(),
+                false,
+                DateTimeAsMicroseconds::now(),
+                Some(1),
+                SqlRequestStatus::Ok { rows: 0 },
+            );
+        }
+
+        let items = log.get_all();
+        assert_eq!(items[0].db_path.as_str(), "/mcp-reporting");
+        assert_eq!(items[1].db_path.as_str(), "/mcp");
     }
 }

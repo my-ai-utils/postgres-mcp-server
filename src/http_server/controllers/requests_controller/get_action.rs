@@ -11,7 +11,7 @@ use super::models::{SqlRequestModel, SqlRequestsModel};
     method: "GET",
     route: "/api/Requests",
     controller: "Requests",
-    description: "Returns the last 100 SQL requests executed through the MCP tool, newest first — including the ones the write gate refused. In-memory only: the list is empty after a restart.",
+    description: "Returns the last 100 SQL requests executed through the MCP tool, across all configured databases, newest first — including the ones the write gate refused. Each item carries the mount path of the database it ran against. In-memory only: the list is empty after a restart.",
     summary: "Read the last SQL requests",
     result:[
         {status_code: 200, description: "Last SQL requests", model: "SqlRequestsModel"},

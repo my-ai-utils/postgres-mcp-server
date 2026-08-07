@@ -509,3 +509,64 @@ textarea {
     flex-shrink: 0;
 }
 
+/* === Write access card: one row per configured database === */
+
+.db-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* The row wraps rather than squeezing: on a narrow window the buttons drop to
+   their own line instead of shrinking away from the database they belong to. */
+.db-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--bg-sunken);
+}
+
+.db-row__main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.db-row__desc {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.db-row__path {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+.db-row__state {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
+}
+
+.db-row__remaining {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--ok);
+}
+
+.db-row__actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+

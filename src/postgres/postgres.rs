@@ -23,9 +23,15 @@ pub struct SqlResponseResult {
 }
 
 impl PostgresAccess {
-    pub async fn new(settings: Arc<crate::settings::SettingsReader>) -> Self {
+    /// One connection per mounted database. `app_name` lands in the Postgres
+    /// `application_name`, and `settings` resolves the connection string of this
+    /// mount alone — see [`crate::settings::DbConnectionSettings`].
+    pub async fn new(
+        app_name: String,
+        settings: Arc<crate::settings::DbConnectionSettings>,
+    ) -> Self {
         Self {
-            postgres: MyPostgres::from_settings(crate::app::APP_NAME, settings)
+            postgres: MyPostgres::from_settings(app_name, settings)
                 .build()
                 .await,
         }

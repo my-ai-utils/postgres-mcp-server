@@ -11,9 +11,10 @@
 //!    `wasm32-unknown-unknown`. Instead `crate::models` declares **plain-serde
 //!    mirror structs** of the server's models and this module calls FlUrl's
 //!    `.get()` / `.post(HttpRequestBody::as_json(&body))` directly. The mirrors
-//!    are therefore drift-prone by construction, which is why every optional
-//!    field is `#[serde(default)]` — an older or newer server still
-//!    deserializes rather than blanking the page.
+//!    are therefore drift-prone by construction, and they are declared strictly
+//!    — no `#[serde(default)]` on anything the server always sends — so drift
+//!    surfaces as a failed fetch in the console rather than as a page of
+//!    zeroes and blanks that looks like real data.
 //!
 //! 2. **Relative URLs, no origin lookup.** `FlUrl::new("/api/Settings")` — the
 //!    wasm fetch backend resolves a root-relative URL against the page origin,
@@ -78,13 +79,15 @@ pub async fn get_server_settings() -> Result<ServerSettings, RequestError> {
     handle_http_response(response).await
 }
 
-/// Opens (`true`) or closes (`false`) the 10-minute MCP write window.
+/// Opens (`true`) or closes (`false`) the 10-minute MCP write window of the
+/// database mounted on `path`. Windows are per database — this never touches
+/// the others.
 ///
 /// The response body echoes the new settings, but callers are expected to
 /// re-read via [`get_server_settings`] instead: the server owns the window and
 /// its clock, so the authoritative countdown comes from a fresh read.
-pub async fn set_mcp_writes(enabled: bool) -> Result<(), RequestError> {
-    let body = SetMcpWritesRequest { enabled };
+pub async fn set_mcp_writes(path: String, enabled: bool) -> Result<(), RequestError> {
+    let body = SetMcpWritesRequest { path, enabled };
 
     let response = FlUrl::new("/api/Settings/McpWrites")
         .post(HttpRequestBody::as_json(&body))

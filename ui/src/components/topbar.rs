@@ -7,7 +7,7 @@ use crate::storage;
 const LOGO: Asset = asset!("/public/favicon.svg");
 
 #[component]
-pub fn Topbar(writes_enabled: bool) -> Element {
+pub fn Topbar(writes_enabled_count: usize, databases_count: usize) -> Element {
     let mut theme = use_signal(|| storage::load_theme().unwrap_or_else(|| "light".to_string()));
     let is_dark = theme.read().as_str() == "dark";
 
@@ -22,10 +22,15 @@ pub fn Topbar(writes_enabled: bool) -> Element {
         theme.set(next.to_string());
     };
 
-    let (writes_label, writes_tone) = if writes_enabled {
-        ("writes on", StateTone::Ok)
-    } else {
-        ("writes off", StateTone::Neutral)
+    // With one database the pill reads as it always did; with several it has to
+    // say how many are open, because "writes on" would hide which.
+    let (writes_label, writes_tone) = match writes_enabled_count {
+        0 => ("writes off".to_string(), StateTone::Neutral),
+        _ if databases_count <= 1 => ("writes on".to_string(), StateTone::Ok),
+        count => (
+            format!("writes on: {} of {}", count, databases_count),
+            StateTone::Ok,
+        ),
     };
 
     let theme_icon = if is_dark { IconKind::Sun } else { IconKind::Moon };
@@ -37,7 +42,7 @@ pub fn Topbar(writes_enabled: bool) -> Element {
                 span { class: "topbar__brand-name", "Postgres MCP Server" }
             }
             div { class: "topbar__actions",
-                StatePill { label: writes_label.to_string(), tone: writes_tone }
+                StatePill { label: writes_label, tone: writes_tone }
                 button {
                     class: "topbar__icon-btn",
                     title: "Toggle theme",

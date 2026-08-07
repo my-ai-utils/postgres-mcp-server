@@ -1,14 +1,30 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use mcp_server_middleware::*;
 
-pub struct WriteAccessPolicyPromptHandler;
+use crate::app::DbContext;
+
+/// Registered once per mounted database, on that database's own endpoint. The
+/// policy text is the same everywhere, but it is prefixed with the database it
+/// applies to, so the model can tell the user which card to click. It never
+/// mentions the other mounts — from the client's side this is a single-database
+/// server.
+pub struct WriteAccessPolicyPromptHandler {
+    db: Arc<DbContext>,
+}
+
+impl WriteAccessPolicyPromptHandler {
+    pub fn new(db: Arc<DbContext>) -> Self {
+        Self { db }
+    }
+}
 
 impl PromptDefinition for WriteAccessPolicyPromptHandler {
     const PROMPT_NAME: &'static str = "write_access_policy";
 
     const DESCRIPTION: &'static str =
-        "How write SQL is gated on this server: the user must grant write access from the UI (10-minute window). Read before sending any INSERT/UPDATE/DELETE/DDL through sql_request.";
+        "How write SQL is gated on this server: the user must grant write access to THIS database from the UI (10-minute window). Read before sending any INSERT/UPDATE/DELETE/DDL through sql_request.";
 
     fn get_argument_descriptions() -> Vec<PromptArgumentDescription> {
         Vec::new()
@@ -21,13 +37,15 @@ impl McpPromptService for WriteAccessPolicyPromptHandler {
         &self,
         _model: &HashMap<String, String>,
     ) -> Result<PromptExecutionResult, String> {
+        let which_database = format!("This server queries one database: **{}**.", self.db.description);
+
         let body = r#"# Write Access Policy
 
 `sql_request` runs read-only SQL at any time. Statements that write are
 DISABLED by default. There is no password — the user must explicitly turn
 write access on from the Postgres MCP Server UI:
 
-> **UI → "Write access" card → click "Enable for 10 min".**
+> **UI → the "Write access" card of this database → click "Enable for 10 min".**
 
 Each click adds **10 minutes** on top of whatever is left, so the user can
 press it twice for 20 minutes. The window then auto-closes. **Disable**
@@ -84,7 +102,7 @@ user can simply grant write access for 10 minutes.
         Ok(PromptExecutionResult {
             description: "How write SQL is gated (UI Write access card, 10-minute window)."
                 .to_string(),
-            message: body.to_string(),
+            message: format!("{}\n\n{}", which_database, body),
         })
     }
 }

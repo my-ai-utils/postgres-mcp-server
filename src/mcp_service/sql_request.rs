@@ -4,7 +4,7 @@ use my_ai_agent::{ToolDefinition, macros::ApplyJsonSchema};
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 use serde::*;
 
-use crate::app::AppContext;
+use crate::app::{AppContext, DbContext};
 use crate::sql_guard::SqlKind;
 use crate::sql_log::SqlRequestStatus;
 use mcp_server_middleware::McpToolCall;
@@ -21,19 +21,25 @@ pub struct SqlRequestToolCallResponse {
     pub sql_response_as_json: String,
 }
 
+/// The `sql_request` tool of a single MCP endpoint.
+///
+/// One instance per mounted database: the endpoint the client called decides
+/// which `db` this is, so the tool takes no database argument — it cannot be
+/// talked into reaching another one, and never reveals that another exists.
 pub struct PostgresMcpService {
     app: Arc<AppContext>,
+    db: Arc<DbContext>,
 }
 
 impl PostgresMcpService {
-    pub fn new(app: Arc<AppContext>) -> Self {
-        Self { app }
+    pub fn new(app: Arc<AppContext>, db: Arc<DbContext>) -> Self {
+        Self { app, db }
     }
 }
 
 impl ToolDefinition for PostgresMcpService {
     const FUNC_NAME: &'static str = "sql_request";
-    const DESCRIPTION: &'static str = "Execute a sql request to database described in system prompt and return the result as json. Read-only statements (SELECT and friends) always work. Statements that write — INSERT, UPDATE, DELETE, TRUNCATE, DDL and anything else that is not a plain read — are refused unless the user has granted write access from the server UI; see the 'write_access_policy' prompt.";
+    const DESCRIPTION: &'static str = "Execute a sql request against the database described in the server instructions and return the result as json. Read-only statements (SELECT and friends) always work. Statements that write — INSERT, UPDATE, DELETE, TRUNCATE, DDL and anything else that is not a plain read — are refused unless the user has granted write access from the server UI; see the 'write_access_policy' prompt.";
 }
 
 #[async_trait::async_trait]
@@ -50,8 +56,9 @@ impl McpToolCall<SqlRequestToolCallRequest, SqlRequestToolCallResponse> for Post
         // Refuse before touching Postgres, but still log the attempt — a refusal
         // the user cannot see looks like the tool silently did nothing.
         if let SqlKind::Write { reason } = &kind {
-            if let Err(message) = crate::sql_guard::ensure_mcp_writes_enabled(&self.app, reason) {
+            if let Err(message) = crate::sql_guard::ensure_mcp_writes_enabled(&self.db, reason) {
                 self.app.sql_log.add(
+                    self.db.path.clone(),
                     sql,
                     true,
                     started,
@@ -64,7 +71,7 @@ impl McpToolCall<SqlRequestToolCallRequest, SqlRequestToolCallResponse> for Post
             }
         }
 
-        let result = self.app.postgres.do_request(sql.clone()).await;
+        let result = self.db.postgres.do_request(sql.clone()).await;
 
         let took_micros = DateTimeAsMicroseconds::now()
             .duration_since(started)
@@ -74,6 +81,7 @@ impl McpToolCall<SqlRequestToolCallRequest, SqlRequestToolCallResponse> for Post
         match result {
             Ok(response) => {
                 self.app.sql_log.add(
+                    self.db.path.clone(),
                     sql,
                     kind.is_write(),
                     started,
@@ -89,6 +97,7 @@ impl McpToolCall<SqlRequestToolCallRequest, SqlRequestToolCallResponse> for Post
             }
             Err(err) => {
                 self.app.sql_log.add(
+                    self.db.path.clone(),
                     sql,
                     kind.is_write(),
                     started,

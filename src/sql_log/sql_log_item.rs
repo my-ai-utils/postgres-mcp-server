@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 /// How a request ended. `Blocked` never reaches Postgres — it is a refusal by
@@ -23,6 +25,9 @@ impl SqlRequestStatus {
 #[derive(Debug)]
 pub struct SqlLogItem {
     pub id: u64,
+    /// Mount path of the database the request ran against — the log is shared
+    /// by every configured database, so without it a row cannot be placed.
+    pub db_path: Arc<String>,
     pub started: DateTimeAsMicroseconds,
     pub sql: String,
     pub is_write: bool,

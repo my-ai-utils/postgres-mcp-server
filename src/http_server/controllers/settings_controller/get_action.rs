@@ -11,8 +11,8 @@ use super::models::SettingsPublicModel;
     method: "GET",
     route: "/api/Settings",
     controller: "Settings",
-    description: "Returns the runtime write-access state: whether write SQL is currently allowed over MCP, and how many seconds are left in the window.",
-    summary: "Read settings",
+    description: "Returns every configured database — its MCP mount path, its description, whether write SQL is currently allowed over that endpoint, and how many seconds are left in its window. Each database has its own window.",
+    summary: "Read the configured databases and their write-access state",
     result:[
         {status_code: 200, description: "Settings", model: "SettingsPublicModel"},
     ]

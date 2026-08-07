@@ -2,33 +2,34 @@ use serde::Deserialize;
 
 /// Mirrors the server's `SqlRequestModel` (an item of `GET /api/Requests`).
 ///
-/// Every optional field carries `#[serde(default)]` so a server that predates a
-/// field still deserializes cleanly instead of failing the whole list.
+/// No `#[serde(default)]` on the required fields: this is a hand-written mirror
+/// of a model that lives in the server crate, so if the two ever drift the fetch
+/// has to fail loudly. A silent default would paint an id of `0` and an empty
+/// SQL cell and look like real data.
+///
+/// The `Option` fields are the ones the server genuinely sends as `null` — a
+/// value that does not apply, not a value that went missing.
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct SqlRequestModel {
-    #[serde(default)]
     pub id: u64,
+    /// Mount path of the database the request ran against, e.g. `/mcp`. The log
+    /// is one timeline across every configured database.
+    pub db: String,
     /// rfc3339, e.g. `2026-07-16T12:04:31.123456+00:00`.
-    #[serde(default)]
     pub started: String,
-    #[serde(default)]
     pub sql: String,
     /// `"read"` | `"write"`. Part of the wire contract; the table does not
     /// surface it as its own column today.
-    #[serde(default)]
     #[allow(dead_code)]
     pub kind: String,
     /// `"ok"` | `"error"` | `"blocked"`.
-    #[serde(default)]
     pub status: String,
-    /// Omitted by the server unless `status == "ok"`.
-    #[serde(default)]
+    /// `null` unless `status == "ok"`.
     pub rows: Option<u64>,
-    /// Omitted by the server when `status == "blocked"` (nothing ran).
-    #[serde(rename = "tookMicros", default)]
+    /// `null` when `status == "blocked"` (nothing ran).
+    #[serde(rename = "tookMicros")]
     pub took_micros: Option<u64>,
-    /// Omitted by the server unless `status` is `"error"` or `"blocked"`.
-    #[serde(default)]
+    /// `null` unless `status` is `"error"` or `"blocked"`.
     pub error: Option<String>,
 }
 
@@ -80,6 +81,5 @@ impl SqlRequestModel {
 /// Envelope of `GET /api/Requests` — `{"items": [...]}`, newest first.
 #[derive(Deserialize, Default)]
 pub struct SqlRequestsResponse {
-    #[serde(default)]
     pub items: Vec<SqlRequestModel>,
 }
