@@ -13,9 +13,11 @@ It also serves a small web UI that shows what the agent has been running and gat
 
 ## Several databases, one server
 
-Each database is mounted on its own path and is a self-contained MCP server from the client's side. Hand `/crm` to one project and `/billing` to another and neither can see the other: the tool takes no database argument, it is bound to a single connection at startup, and **nothing on the MCP surface mentions the other mounts** — not the instructions, not the tool description, not a refusal message. There is no endpoint that lists the databases.
+Each database is mounted on its own path and is a self-contained MCP server from the client's side. Hand `/crm` to one project and `/billing` to another and neither can see the other: the tool takes no database argument, it is bound to a single connection at startup, and **nothing on the MCP surface mentions the other mounts** — not the instructions, not the tool description, not a refusal message. No MCP method lists the databases, and an endpoint never enumerates its siblings.
 
-The admin UI is the other side of that: it shows *all* of them — every database with its own write-access card, and one request log covering all of them with a `Database` column.
+The admin UI is the other side of that: it shows *all* of them — a single **Write access** card with one row per database (description, mount path, its own state pill, countdown and *Enable for 10 min* / *+10 min* / *Disable* buttons), and one request log covering all of them with a `Database` column.
+
+The admin API is the deliberate exception, and it is not gated: `GET /api/Settings` lists every mount path and description to anyone who can reach the port, and `POST /api/Settings/McpWrites` will open any of their write windows. The path split separates *clients* from each other; it is not an authorization boundary. See *Limitations*.
 
 Each database also gets its own:
 
@@ -25,7 +27,7 @@ Each database also gets its own:
 
 ## Write access
 
-Read-only SQL runs at any time. Anything that writes is **refused by default**; the user grants writes from that database's *Write access* card in the UI. Every click adds **10 minutes** on top of whatever is left, so pressing it three times buys 30 minutes; *Disable* resets it to closed. The window auto-expires, and a restart always comes up disabled — it is runtime-only state and is never persisted. The window belongs to **one database**; there is no server-wide switch.
+Read-only SQL runs at any time. Anything that writes is **refused by default**; the user grants writes from that database's row in the UI's *Write access* card. Every click adds **10 minutes** on top of whatever is left, so pressing it three times buys 30 minutes; *Disable* resets it to closed. The window auto-expires, and a restart always comes up disabled — it is runtime-only state and is never persisted. The window belongs to **one database**; there is no server-wide switch.
 
 The server **allow-lists reads** rather than deny-listing writes: only `SELECT`, `WITH ... SELECT`, `EXPLAIN` (without `ANALYZE`), `SHOW`, `TABLE` and `VALUES` are treated as reads. Everything else — including anything the classifier cannot parse — needs the window. That direction is deliberate: a deny-list fails *open* (one missed statement is an unguarded write), an allow-list fails *closed* (the worst case is a refused `SELECT`, which the user sees and can fix).
 
@@ -52,6 +54,8 @@ That over-blocks by design. The rule is meant to be predictable ("if it says ins
 
 The last **100** requests are kept in memory (`GET /api/Requests`, newest first) and shown in the UI: time, database, SQL, rows returned, duration, status. It is one timeline across every configured database — the operator's view, not a client's — and each entry carries the mount path it ran against. Refusals are logged too — a blocked request that left no trace would look like the tool silently did nothing. The log is in-memory only and empty after a restart.
 
+The SQL text is stored truncated: anything over **4096 bytes** is cut on a char boundary and gets a trailing `…`, in the API and the UI alike. The tool accepts arbitrary SQL, so 100 unbounded statements pinned in memory would be a real footgun.
+
 Note that `rows` means **rows returned**, not rows affected: queries go through the extended protocol, so a write without `RETURNING` reports 0 rows.
 
 ### Response format
@@ -68,11 +72,15 @@ Columnar (compact, friendly to LLM token budgets):
 }
 ```
 
-Types are mapped per Postgres column type (`bool`, ints, floats, text, `uuid`, timestamps, `date`/`time`, `json`/`jsonb`, `bytea` as hex). `NULL` becomes a JSON null. An unmapped type renders as `[unsupported pg type: <name>]`.
+`columns` is read off the **first returned row**, so a query that matched nothing comes back as `{"columns": [], "rows": []}` — with no row to read them from, the column names are not known. That is also the shape of every write without `RETURNING`.
+
+Types are mapped per Postgres column type: `bool`, `int2`/`int4`/`int8`/`oid`, `float4`/`float8`, `text`/`varchar`/`bpchar`/`name`, `uuid`, `timestamp`/`timestamptz`, `date`/`time`, `json`/`jsonb`, and `bytea` as a `\x…` hex string. Everything else is unmapped and renders as the placeholder `[unsupported pg type: <name>]` — notably **`numeric`/`decimal`**, and also `interval`, `timetz`, the network types, enums and every array type. Cast those in the query (`price::float8`, `price::text`) if you need the value.
+
+`NULL` becomes a JSON null in a mapped column (so does a value the mapping fails to read). In an unmapped column it does not: that branch never inspects the value, so a NULL `numeric` also comes back as the placeholder string.
 
 ## Configuration
 
-Settings are read from `~/.postgres-mcp-server` (YAML — JSON is valid YAML, so the old brace form still parses):
+Settings are read from `~/.postgres-mcp-server`, parsed as YAML (JSON is valid YAML, so a braced JSON file works just as well):
 
 ```yaml
 databases:
@@ -84,19 +92,34 @@ databases:
   description: "Read-only reporting replica"
 ```
 
-One entry per database. All three fields are required, on every entry, and there are **no defaults anywhere in this model**: a missing key is a typo, not a request for a fallback, so the server refuses to start and says which entry is wrong. The same goes for these, all checked at boot:
+If the file cannot be read at all, the server falls back to fetching the same YAML over HTTP from `SETTINGS_URL`, and then keeps refreshing from that URL rather than from the file — a settings file created afterwards is not picked up until a restart. With neither present, startup prints `Can not load settings from file` on stderr and then panics on `Environment variable SETTINGS_URL is not set`.
 
-- a path that is already used by another entry (compared case-insensitively, the way requests are routed),
+One entry per database. All three fields are required, on every entry, and there are **no defaults anywhere in this model**: a missing key is a typo, not a request for a fallback, so the server refuses to start and says which entry is wrong. Also refused at boot:
+
+- a `databases:` list that is present but empty — at least one entry is required,
+- a path already used by another entry (compared case-insensitively, the way requests are routed),
 - `/`, `/api…` or `/swagger…`, which belong to the UI, the admin API and swagger,
 - an empty `conn_string` or `description`.
 
-A path may be written without the leading slash or with a trailing one (`mcp-reporting/`); it is normalized to `/mcp-reporting`.
+A path may be written without the leading slash or with a trailing one (`mcp-reporting/`); it is normalized to `/mcp-reporting`. Note that this normalization applies to the settings file, not to the URL a client uses — see *Connecting an MCP client*.
 
-`description` is required rather than optional because it is what the agent is told the endpoint is bound to (it goes into the MCP `instructions` verbatim) and what labels the card in the UI. An endpoint with a blank one is an endpoint nobody can identify.
+`description` is required rather than optional because it is the whole identity of the endpoint: it is the MCP server name the client sees (`Postgres MCP Server (<description>)`), it goes into the MCP `instructions` verbatim, it opens the `write_access_policy` prompt, it is named in every write refusal, and it labels the database's row in the UI. An endpoint with a blank one is an endpoint nobody can identify. Descriptions are *not* checked for uniqueness, but since the agent is told to ask the user for "the row for `<description>`", two identical ones make that instruction ambiguous — keep them distinct.
 
-The connection string is the standard `tokio_postgres` form. SSH tunneling and TLS features are compiled in via `my-postgres`. It is re-read from the file per mount on every reconnect, so editing a `conn_string` is picked up without a restart — but adding or removing a `path` needs one, since each path is an HTTP middleware registered at startup.
+The connection string is the standard `tokio_postgres` form. SSH tunneling and TLS features are compiled in via `my-postgres` (`sslmode=require` turns TLS on; `ssh=user@host:port` opens a tunnel).
 
-> **Note.** The single-database `postgres_conn_string: "…"` form is gone. Wrap it in a `databases` entry as above.
+Its *content* is not validated here — only that it is non-empty. `my-postgres` parses it at startup and unwraps `host`, `dbname`, `user` and `password`, so a string missing any of those four takes the **whole process** down with a bare `Option::unwrap()` panic pointing into the driver, before the port is even bound. (`port` may be omitted.) An unreachable host is a different matter: that mount just retries in the background and the rest of the server runs normally.
+
+### What a running server picks up, and what it does not
+
+The connection string is resolved per mount on every **(re)connect** — not read from disk at that moment, but from the copy of the settings the process holds in memory, which `my-settings-reader` refreshes from the file on a 60-second timer. So an edited `conn_string` is picked up without a restart, but only on the first reconnect after the next refresh, and *nothing forces a reconnect* — a healthy connection keeps the old string until it drops. If the edited file is invalid YAML the refresh is skipped (one line on stderr) and the previous settings stay in force; the same file at boot aborts the start instead.
+
+Everything else needs a restart:
+
+- **`path`** — each one is an HTTP middleware registered at startup.
+- **`description`** — read once at startup and baked into that endpoint's MCP server name and `instructions`, its prompt and its UI row.
+- **removing a database** — deleting the entry does not take the endpoint down, and does not even cut the connection: a path that is no longer in the file, or whose `conn_string` has been blanked, falls back to the connection string it had at startup rather than to an empty one. **Editing the settings file is not a way to revoke access; only a restart is.**
+
+> **Migrating from the single-database form.** `postgres_conn_string: "…"` is gone — wrap it in a `databases` entry as above, and give that entry `path: /mcp`: that was the hard-coded path of the single-database server, so keeping it means existing client URLs (`http://localhost:8000/mcp`) go on working. Until you convert the file the server does not start — it no longer deserializes, and the process aborts while parsing with ``Invalid yaml format of file: …. Err: missing field `databases` `` — *before* any of the per-entry checks above, so the message names no entry. A `postgres_conn_string:` key left behind *next to* a valid `databases:` list is simply ignored, with no warning. The admin API changed with it: `GET /api/Settings` now returns `{ "databases": [ … ] }` instead of a flat `{ mcpWritesEnabled, mcpWritesRemainingSecs }`, and `POST /api/Settings/McpWrites` now requires a `path` alongside `enabled`.
 
 ## Running
 
@@ -112,6 +135,8 @@ Then open <http://localhost:8000/>.
 
 `wwwroot/` must exist before the image is built — the Dockerfile copies it in. It is committed to the repo, so a plain checkout is enough; rebuild it only when the UI changes (see below).
 
+`Dockerfile` and `.github/workflows/release.yaml` are **generated**: `build.rs` runs `ci-utils`' `CiGenerator` on every `cargo build` and rewrites both, so hand-edits to either are silently reverted. The `COPY ./wwwroot ./wwwroot` line exists because `build.rs` declares `.add_docker_copy_file("./wwwroot", "./wwwroot")` — change it there, not in the Dockerfile.
+
 ```sh
 cargo build --release
 docker build -t postgres-mcp-server .
@@ -123,9 +148,13 @@ docker run --rm -p 8000:8000 -v ~/.postgres-mcp-server:/root/.postgres-mcp-serve
 The UI is a separate Dioxus (WASM) crate in [`ui/`](ui/) with its own `Cargo.lock`; it is not a workspace member. `build.sh` compiles it and copies the result into `wwwroot/`, which is committed alongside the source.
 
 ```sh
-cd ui
-./build.sh          # dx build --release --web  ->  ../wwwroot
+./build-ui.sh            # from the repo root (thin wrapper), or:
+cd ui && ./build.sh      # dx build --release --web -> cache-bust index.html -> ../wwwroot
 ```
+
+It needs `dx` (**0.7.10** — it must match the `dioxus` version in `ui/Cargo.toml`, or dx refuses to build) and `python3`: `build.sh` runs `build.py` to append cache-busting query strings to the asset URLs in `index.html`. It also does `rm -rf ../wwwroot` before copying, so that directory is replaced wholesale — anything put there by hand is gone after a build.
+
+The stylesheet is generated too: `ui/build.rs` concatenates `ui/css/01-tokens.css` … `05-databases.css` into `ui/public/assets/app.css`. That file is committed and so looks like a source file, but editing it is pointless — the next build overwrites it. A new `.css` file is picked up only once it is added to the `CssCompiler` chain in `ui/build.rs`.
 
 Use `dx build` / `dx serve` for that crate — never `cargo build`. CI does not build the UI, so **commit `wwwroot/` whenever you change `ui/`**.
 
@@ -146,7 +175,9 @@ Point your MCP client at the path of the database it should get — one entry pe
 }
 ```
 
-The session is established automatically on first request (`initialize`); subsequent calls reuse the `mcp-session-id` header. Sessions belong to one endpoint — an id minted on `/mcp` means nothing on `/mcp-reporting`.
+**The URL must be a mount path exactly.** Case does not matter (`/MCP` reaches `/mcp`), a trailing slash does: `http://localhost:8000/mcp/` matches no MCP middleware and falls through to the SPA fallback, which answers `index.html` with **HTTP 200** for any method. A client pointed at a slightly wrong path therefore gets an HTML page where it expected JSON-RPC — a parse or protocol error, never a 404 — so check the path first. (The leading/trailing-slash normalization in *Configuration* applies to the settings file, not to this URL.)
+
+The session is established automatically on first request (`initialize`); subsequent calls reuse the `mcp-session-id` header. Each endpoint keeps its own session registry, so an id minted on `/mcp` carries no state on `/mcp-reporting` — it is adopted there as a fresh, unrelated session rather than rejected.
 
 ## How a request flows
 
@@ -154,7 +185,7 @@ The session is established automatically on first request (`initialize`); subseq
 2. [`PostgresMcpService::execute_tool_call`](src/mcp_service/sql_request.rs) receives the SQL string.
 3. [`sql_guard::classify`](src/sql_guard/classifier.rs) decides read vs write; a write with *that database's* window closed is refused here, logged, and never reaches Postgres.
 4. [`PostgresAccess::do_request`](src/postgres/postgres.rs) executes it via `MyPostgres::execute_sql_as_vec` with a 10s timeout.
-5. Each row is converted to a JSON value array; column names are captured once.
+5. Each row is converted to a JSON value array; the column names are emitted once, taken from the first returned row — so a result with no rows carries no column names either.
 6. The outcome (rows, duration, error) is recorded in [`sql_log`](src/sql_log/) and the JSON is returned through the MCP middleware.
 
 ## HTTP API
@@ -162,7 +193,7 @@ The session is established automatically on first request (`initialize`); subseq
 | Route | Purpose |
 |---|---|
 | `GET /api/Settings` | every configured database: path, description, write-access state + seconds left |
-| `POST /api/Settings/McpWrites` | `{ "path": string, "enabled": bool }` — open/close the 10-minute window of one database; `404` if that path is not configured |
+| `POST /api/Settings/McpWrites` | `{ "path": string, "enabled": bool }` — open/close the 10-minute window of one database. `200` returns the same body as `GET /api/Settings`, so the new countdown needs no follow-up read; `404` if that path is not configured |
 | `GET /api/Requests` | last 100 SQL requests across all databases, newest first; each carries the `db` it ran on |
 | `/swagger` | generated API docs |
 
@@ -172,8 +203,9 @@ The session is established automatically on first request (`initialize`); subseq
 - **Unauthenticated** — anyone who can reach the port can query any configured database, and can open any write window. The path separation isolates *clients* from each other, not the server from the network. Do not expose it to untrusted networks.
 - **One statement per call** — several statements separated by `;` are refused; the extended protocol cannot run them.
 - **10s query timeout** is hardcoded.
-- **Adding or removing a database needs a restart** — each one is an HTTP middleware registered at startup. Changing an existing `conn_string` does not.
-- **The request log is shared**: 100 entries total, not 100 per database, so a busy database can push a quiet one's history out.
+- **Adding or removing a database needs a restart** — each one is an HTTP middleware registered at startup. Only `conn_string` is picked up live, and deleting an entry neither takes its endpoint down nor cuts its connection; see *What a running server picks up*.
+- **The request log is shared**: 100 entries total, not 100 per database, so a busy database can push a quiet one's history out. It also truncates SQL at 4096 bytes.
+- **`numeric`/`decimal` and other unmapped types** come back as `[unsupported pg type: …]`, not as values — cast them in the query.
 
 ## Project layout
 
@@ -190,7 +222,12 @@ src/
 ├── sql_guard/           # read/write classifier + the write gate
 └── sql_log/             # in-memory ring buffer of the last 100 requests
 ui/                      # Dioxus WASM admin UI  ->  builds into wwwroot/
+├── css/                 #   stylesheet sources (01-tokens … 05-databases);
+│                        #   ui/build.rs concatenates them into
+├── public/              #   public/assets/app.css — generated, committed
+└── src/                 #   pages / components / api client
 wwwroot/                 # built UI, committed; served at /
+Dockerfile               # generated by build.rs (ci-utils) — do not hand-edit
 ```
 
 ## Dependencies

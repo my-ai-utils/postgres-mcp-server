@@ -45,7 +45,7 @@ impl McpPromptService for WriteAccessPolicyPromptHandler {
 DISABLED by default. There is no password — the user must explicitly turn
 write access on from the Postgres MCP Server UI:
 
-> **UI → the "Write access" card of this database → click "Enable for 10 min".**
+> **UI → the "Write access" card → the row for this database → click "Enable for 10 min".**
 
 Each click adds **10 minutes** on top of whatever is left, so the user can
 press it twice for 20 minutes. The window then auto-closes. **Disable**

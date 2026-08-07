@@ -21,7 +21,7 @@ pub fn ensure_mcp_writes_enabled(db: &DbContext, reason: &str) -> Result<(), Str
         "This request was REFUSED because it writes to the database ({reason}), and write access \
          is currently DISABLED. Read-only queries (SELECT and friends) always work. To allow \
          writes, ask the user to open the Postgres MCP Server UI and click \"Enable for 10 min\" \
-         on the Write access card of '{db_label}'; writes then stay on for 10 minutes. Do not \
-         retry until the user confirms they have enabled it."
+         on the row for '{db_label}' in the Write access card; writes then stay on for 10 \
+         minutes. Do not retry until the user confirms they have enabled it."
     ))
 }
