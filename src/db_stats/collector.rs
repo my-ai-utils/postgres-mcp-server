@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rust_extensions::MyTimerTick;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
+use rust_extensions::{MyTimerTick, RepeatTimerIteration};
 
 use crate::app::{AppContext, DbContext};
 
@@ -62,9 +62,18 @@ impl FastStatsTimer {
     }
 }
 
+/// All three timers here answer [`RepeatTimerIteration::WithInterval`]: each tick
+/// is one complete pass over every database, bounded by the per-query ceiling in
+/// [`crate::postgres::PostgresAccess::query_typed`], and there is never a
+/// half-finished batch to carry into another iteration.
+///
+/// `Immediately` exists for ticks that split a long job into portions to keep
+/// inside `iteration_timeout`. It would be actively wrong here: the fast tick's
+/// cost is dominated by *waiting* on a database, so re-entering at once would
+/// mean spinning on an unreachable one instead of honouring the 5-second interval.
 #[async_trait::async_trait]
 impl MyTimerTick for FastStatsTimer {
-    async fn tick(&self) {
+    async fn tick(&self) -> RepeatTimerIteration {
         let mut running = tokio::task::JoinSet::new();
 
         for db in &self.app.databases {
@@ -82,21 +91,19 @@ impl MyTimerTick for FastStatsTimer {
         }
 
         if samples.is_empty() {
-            return;
+            return RepeatTimerIteration::WithInterval;
         }
 
         // One commit for the whole tick — see `MetricsStore`'s module docs.
-        if let Err(err) = self
+        let written = self
             .app
             .metrics
             .write_load(DateTimeAsMicroseconds::now(), samples)
-            .await
-        {
-            self.app.metrics_write_error.set(Some(err));
-            return;
-        }
+            .await;
 
-        self.app.metrics_write_error.set(None);
+        self.app.metrics_write_error.set(written.err());
+
+        RepeatTimerIteration::WithInterval
     }
 }
 
@@ -112,7 +119,7 @@ impl SlowStatsTimer {
 
 #[async_trait::async_trait]
 impl MyTimerTick for SlowStatsTimer {
-    async fn tick(&self) {
+    async fn tick(&self) -> RepeatTimerIteration {
         let mut running = tokio::task::JoinSet::new();
 
         for db in &self.app.databases {
@@ -120,6 +127,8 @@ impl MyTimerTick for SlowStatsTimer {
         }
 
         while running.join_next().await.is_some() {}
+
+        RepeatTimerIteration::WithInterval
     }
 }
 
@@ -141,9 +150,9 @@ impl HourlyHistoryTimer {
 
 #[async_trait::async_trait]
 impl MyTimerTick for HourlyHistoryTimer {
-    async fn tick(&self) {
+    async fn tick(&self) -> RepeatTimerIteration {
         if !self.app.metrics.is_enabled() {
-            return;
+            return RepeatTimerIteration::WithInterval;
         }
 
         let at = DateTimeAsMicroseconds::now();
@@ -182,6 +191,8 @@ impl MyTimerTick for HourlyHistoryTimer {
         if error.is_some() {
             self.app.metrics_write_error.set(error);
         }
+
+        RepeatTimerIteration::WithInterval
     }
 }
 
