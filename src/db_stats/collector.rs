@@ -152,6 +152,14 @@ impl HourlyHistoryTimer {
 impl MyTimerTick for HourlyHistoryTimer {
     async fn tick(&self) -> RepeatTimerIteration {
         if !self.app.metrics.is_enabled() {
+            // Still drain the hour, even with nowhere to write it: leaving it filled
+            // would turn "the longest queries this hour" into "the longest ever
+            // seen", so if history is enabled later the first hour recorded would be
+            // a lie.
+            for db in &self.app.databases {
+                db.longest_seen.take_top();
+            }
+
             return RepeatTimerIteration::WithInterval;
         }
 
@@ -162,10 +170,21 @@ impl MyTimerTick for HourlyHistoryTimer {
         for db in &self.app.databases {
             let snapshot = db.stats.get();
 
+            // Draining the accumulator also starts the next hour, so this must run
+            // exactly once per hour per database even if the write below fails —
+            // otherwise a single very slow query would head every hour after it.
+            let longest = db.longest_seen.take_top();
+
             if let Err(err) = self
                 .app
                 .metrics
-                .write_hourly(at, &snapshot.tables, &snapshot.statements, db.path.as_str())
+                .write_hourly(
+                    at,
+                    &snapshot.tables,
+                    &snapshot.statements,
+                    longest,
+                    db.path.as_str(),
+                )
                 .await
             {
                 error = Some(err);
@@ -177,11 +196,12 @@ impl MyTimerTick for HourlyHistoryTimer {
                 if collected.total() > 0 {
                     println!(
                         "Metrics history: deleted {} expired rows (load {}, table sizes {}, \
-                         statements {})",
+                         statements {}, longest {})",
                         collected.total(),
                         collected.load,
                         collected.table_sizes,
-                        collected.statements
+                        collected.statements,
+                        collected.longest
                     );
                 }
             }
@@ -240,6 +260,14 @@ async fn collect_fast(db: Arc<DbContext>) -> Option<(String, LoadSample)> {
         super::collect_activity(&db.postgres, capabilities.server_version_num, QUERY_TIMEOUT).await;
 
     let health = super::collect_health(&db.postgres, &capabilities, QUERY_TIMEOUT).await;
+
+    // Every tick contributes to the hour's longest-query ranking. This has to happen
+    // here, on the 5-second timer, because `pg_stat_activity` shows only what is
+    // executing at this instant: an hourly read would catch just the statements
+    // that happened to be running in that one second.
+    if let Ok(activity) = &activity {
+        db.longest_seen.observe(activity.longest.as_slice());
+    }
 
     db.stats.apply_fast_tick(FastTick {
         activity: Section::from_result(activity),

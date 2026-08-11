@@ -478,11 +478,33 @@ pub struct DbStats {
     pub tables: Tables,
 }
 
+/// Which Postgres server a database lives on, derived by the server from the
+/// connection string. Carries no credentials.
+#[derive(Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerRef {
+    /// Databases sharing this key are on one server. The page groups and switches
+    /// by it.
+    pub key: String,
+    pub label: String,
+    pub host: String,
+    pub port: i64,
+    /// The database this mount opens, from the connection string.
+    pub database: Option<String>,
+    /// Server + database. Two mounts sharing this open the **same** database and
+    /// therefore read identical counters — the page marks the second one as a copy
+    /// rather than drawing it as extra load. `None` when the connection string does
+    /// not name a database, in which case sameness cannot be proven and the mounts
+    /// are treated as distinct.
+    pub database_key: Option<String>,
+}
+
 #[derive(Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseStats {
     pub path: String,
     pub description: String,
+    pub server: ServerRef,
     pub stats: DbStats,
 }
 
@@ -531,4 +553,33 @@ impl HistoryInfo {
 pub struct ServerStats {
     pub history: HistoryInfo,
     pub databases: Vec<DatabaseStats>,
+}
+
+impl ServerStats {
+    /// The distinct Postgres servers behind the configured databases, in the order
+    /// the settings file declares them.
+    ///
+    /// Several mounts routinely share one server, and with a single server there is
+    /// nothing to switch between — which is why the page asks for this rather than
+    /// assuming one section per database.
+    pub fn servers(&self) -> Vec<ServerRef> {
+        let mut result: Vec<ServerRef> = Vec::new();
+
+        for db in &self.databases {
+            if !result.iter().any(|known| known.key == db.server.key) {
+                result.push(db.server.clone());
+            }
+        }
+
+        result
+    }
+
+    /// The databases on one server, in declaration order.
+    pub fn databases_on(&self, server_key: &str) -> Vec<DatabaseStats> {
+        self.databases
+            .iter()
+            .filter(|db| db.server.key == server_key)
+            .cloned()
+            .collect()
+    }
 }

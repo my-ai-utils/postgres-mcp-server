@@ -34,6 +34,16 @@
     --reader: var(--accent);
     --reader-soft: var(--accent-soft);
 
+    /* Chart marks get their own token rather than reusing --accent, which is tuned
+       for text and links. One hue is enough because each database gets its own
+       panel: identity is carried by the panel title, not by colour. Both modes were
+       checked against their own surface with the palette validator — lightness band,
+       chroma floor, contrast — rather than picked by eye. */
+    --chart-line: #8c68cd;
+    --chart-fill: rgba(140, 104, 205, 0.16);
+    --chart-grid: #e4e6ee;
+    --chart-threshold: #d99826;
+
     --r-sm: 4px;
     --r-md: 6px;
     --r-lg: 10px;
@@ -73,6 +83,14 @@
     --writer-soft: var(--info-soft);
     --reader: var(--accent);
     --reader-soft: var(--accent-soft);
+
+    /* Re-stepped for the dark surface, not flipped: the light accent #8c68cd and the
+       UI's dark accent #b298ee both fail the dark lightness band (0.48–0.67), the
+       latter at L 0.736. */
+    --chart-line: #a17ce8;
+    --chart-fill: rgba(161, 124, 232, 0.20);
+    --chart-grid: #232c4a;
+    --chart-threshold: #e0a64a;
 }
 
 /* === Reset / base === */
@@ -603,6 +621,258 @@ textarea {
     background: var(--accent-soft);
     color: var(--accent-strong);
     font-weight: 600;
+}
+
+/* --- Server switch ---
+   Only rendered with more than one Postgres server behind the configured
+   databases; see ServerSwitch. */
+.server-switch {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.server-switch__caption {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.server-switch__tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.server-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--bg-elev);
+    color: var(--text-muted);
+    font-size: 12.5px;
+    font-weight: 500;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.server-tab:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-strong);
+    color: var(--text);
+}
+
+.server-tab--active {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent-strong);
+    font-weight: 600;
+}
+
+/* How many databases sit on that server — the reason the switch exists. */
+.server-tab__count {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--bg-sunken);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.server-tab--active .server-tab__count {
+    background: var(--bg-elev);
+    color: var(--accent-strong);
+}
+
+/* === Execution load: one panel per database ===
+   Small multiples rather than N coloured lines on one chart. active_time is a
+   pg_stat_database column, so there is one series per database and nothing to add
+   up; panels also carry identity in their titles, which means one hue instead of a
+   categorical palette that fails all-pairs CVD checks beyond four series. */
+.charts {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.charts--empty {
+    padding: 22px 0;
+    text-align: center;
+}
+
+.panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.panel__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.panel__title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+}
+
+.panel__desc {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.panel__path {
+    font-size: 11px;
+    color: var(--text-faint);
+}
+
+.panel__stats {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.panel__stats .faint {
+    font-weight: 500;
+    font-size: 11px;
+}
+
+/* Two mounts onto one database read the same counters — say so on the copy rather
+   than letting it read as extra load. */
+.panel__note {
+    font-size: 11.5px;
+    color: var(--warn);
+    line-height: 1.4;
+}
+
+.panel__empty {
+    padding: 14px 0 14px 46px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+
+.panel__plot {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+}
+
+/* Axis labels are HTML: the plot is stretched horizontally and would stretch any
+   text drawn inside it. */
+.chart__y-axis {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: flex-end;
+    width: 38px;
+    flex-shrink: 0;
+    font-size: 10.5px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+    margin: -6px 0;
+    padding: 6px 0;
+}
+
+.chart__svg {
+    flex: 1;
+    min-width: 0;
+    height: 74px;
+    display: block;
+    overflow: visible;
+}
+
+/* non-scaling-stroke is what makes preserveAspectRatio="none" safe: the box is
+   stretched to the card width, but strokes keep their real thickness. */
+.chart__grid {
+    stroke: var(--chart-grid);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+}
+
+.chart__grid--base {
+    stroke: var(--border-strong);
+}
+
+.chart__threshold {
+    stroke: var(--chart-threshold);
+    stroke-width: 1;
+    stroke-dasharray: 4 4;
+    vector-effect: non-scaling-stroke;
+}
+
+.chart__area {
+    fill: var(--chart-fill);
+    stroke: none;
+}
+
+.chart__line {
+    fill: none;
+    stroke: var(--chart-line);
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+}
+
+/* A segment of one sample has no line to draw — without this, a single tick that
+   survived an outage would be invisible. */
+.chart__dot {
+    fill: var(--chart-line);
+    stroke: none;
+}
+
+.chart__x-axis {
+    display: flex;
+    justify-content: space-between;
+    padding-left: 46px;
+    font-size: 10.5px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+}
+
+.chart__footnote {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding-left: 46px;
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+.chart__footnote b {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.chart__threshold-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-faint);
+}
+
+.chart__threshold-key::before {
+    content: "";
+    width: 14px;
+    border-top: 1px dashed var(--chart-threshold);
 }
 
 /* --- One database's block --- */

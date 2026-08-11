@@ -52,6 +52,9 @@ pub mod collector;
 mod health;
 pub use health::*;
 
+mod longest_seen;
+pub use longest_seen::*;
+
 mod public_model;
 pub use public_model::*;
 

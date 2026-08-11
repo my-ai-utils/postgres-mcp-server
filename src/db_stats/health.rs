@@ -190,10 +190,15 @@ fn rates(current: &DbHealthSample, previous: &DbHealthSample) -> Option<DbHealth
         return None;
     }
 
+    // Microseconds, not `get_full_seconds()`: that truncates, so a 5.9-second window
+    // would be divided by 5 and every rate on the page would read ~18% high. The
+    // error is systematic and always in the same direction, which is worse than
+    // noise — it would make an idle database look busier than it is, consistently.
     let window_secs = current
         .taken_at
         .duration_since(previous.taken_at)
-        .get_full_seconds() as f64;
+        .get_full_micros() as f64
+        / 1_000_000.0;
 
     // Two samples inside the same second would divide by ~0 and produce
     // meaningless spikes.

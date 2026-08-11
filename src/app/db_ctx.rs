@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
-use crate::settings::{DatabaseMount, DbConnectionSettings, SettingsReader};
+use crate::settings::{DatabaseMount, DbConnectionSettings, ServerEndpoint, SettingsReader};
 
 /// How much time a single "Enable" click adds. Clicks accumulate — pressing it
 /// three times buys 30 minutes.
@@ -35,6 +35,17 @@ pub struct DbContext {
     /// What this database is, from the settings file — the UI subtitle, and the
     /// MCP endpoint's instructions to the agent.
     pub description: String,
+
+    /// Which Postgres server this mount talks to, read off the connection string
+    /// once at startup.
+    ///
+    /// Several mounts routinely share one server, and the operator never states
+    /// that anywhere — so it is derived, and it is what the UI groups and switches
+    /// by. Resolved here rather than per request because the connection string is
+    /// re-read live and a parse per API call would be both wasteful and able to
+    /// change a mount's server identity underneath the UI mid-session.
+    pub server: ServerEndpoint,
+
     pub postgres: crate::postgres::PostgresAccess,
 
     /// Last statistics collected for **this** database.
@@ -44,6 +55,11 @@ pub struct DbContext {
     /// version, its privileges, its tables — and a mount whose database is
     /// unreachable must not blank the numbers of the ones that are up.
     pub stats: crate::db_stats::DbStatsCache,
+
+    /// The longest-running statements seen on this database since the last hourly
+    /// flush. Filled from the 5-second ticks, because `pg_stat_activity` keeps no
+    /// history of its own — see [`crate::db_stats::LongestSeenInHour`].
+    pub longest_seen: crate::db_stats::LongestSeenInHour,
 
     /// Expiry (`unix_microseconds`) of this database's write-access window; `0`
     /// means disabled. Stored as the deadline rather than a flag plus a timer,
@@ -56,6 +72,8 @@ pub struct DbContext {
 
 impl DbContext {
     pub async fn new(mount: DatabaseMount, settings: Arc<SettingsReader>) -> Self {
+        let server = mount.server();
+
         let conn_settings = Arc::new(DbConnectionSettings::new(settings, &mount));
 
         // The Postgres `application_name` carries the mount path, so a session
@@ -65,8 +83,10 @@ impl DbContext {
         Self {
             path: Arc::new(mount.path),
             description: mount.description,
+            server,
             postgres: crate::postgres::PostgresAccess::new(app_name, conn_settings).await,
             stats: crate::db_stats::DbStatsCache::new(),
+            longest_seen: crate::db_stats::LongestSeenInHour::new(),
             mcp_writes_enabled_until: AtomicI64::new(0),
         }
     }

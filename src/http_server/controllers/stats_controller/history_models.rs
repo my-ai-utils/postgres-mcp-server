@@ -3,13 +3,16 @@ use serde::{Deserialize, Serialize};
 
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
-use crate::db_stats::{HistoryRow, LoadSample, StatementLoadSample, TableSizeSample};
+use crate::db_stats::{
+    HistoryRow, LoadSample, LongestQuerySample, StatementLoadSample, TableSizeSample,
+};
 
 /// Sections of the history, mirroring the `db_stats` MCP tool's `section` argument
 /// so the two surfaces use the same vocabulary.
 pub const SECTION_LOAD: &str = "load";
 pub const SECTION_TABLES: &str = "tables";
 pub const SECTION_STATEMENTS: &str = "statements";
+pub const SECTION_LONGEST: &str = "longest";
 
 /// Hard ceiling on the window. Retention is three days, so a longer request could
 /// only ever return the same rows; the cap keeps a hand-typed `hours=100000` from
@@ -35,7 +38,7 @@ pub struct HistoryInput {
 
     #[http_query(
         name = "section",
-        description = "Which series to return: \"load\" (the 5-second load samples), \"tables\" (hourly table sizes) or \"statements\" (hourly statement costs). Defaults to \"load\".",
+        description = "Which series to return: \"load\" (the 5-second load samples), \"tables\" (hourly table sizes), \"statements\" (hourly statement costs) or \"longest\" (each hour's top-5 longest-running statements). Defaults to \"load\".",
         default = "load"
     )]
     pub section: Option<String>,
@@ -62,14 +65,19 @@ impl HistoryInput {
     }
 }
 
-/// One point of the load series. Flattened rather than nested so a chart can read
-/// `at` and the value it wants from the same object.
+/// One point of the load series — one 5-second sample of one database.
 #[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadPointModel {
     pub at: String,
-    // Backend-seconds of execution per wall-clock second — the closest proxy to
-    // CPU that Postgres exposes. Null on servers older than 14.
+    // The same instant as epoch milliseconds. Sent alongside `at` because a chart
+    // has to do arithmetic on time — place a point on an axis, measure the gap to
+    // its neighbour to decide whether the line breaks — and parsing RFC 3339 in the
+    // wasm client would mean a date library in the bundle for one subtraction.
+    pub at_unix_ms: i64,
+    // Backend-seconds of execution per wall-clock second, for THIS database.
+    // Not a CPU figure: a backend waiting on disk or a lock still counts as
+    // executing. Null on servers older than 14, which have no active_time column.
     pub busy_backends: Option<f64>,
     pub commits_per_sec: Option<f64>,
     pub rollbacks_per_sec: Option<f64>,
@@ -88,6 +96,7 @@ impl LoadPointModel {
     fn new(src: HistoryRow<LoadSample>) -> Self {
         Self {
             at: src.at.to_rfc3339(),
+            at_unix_ms: src.at.unix_microseconds / 1_000,
             busy_backends: src.value.busy_backends,
             commits_per_sec: src.value.commits_per_sec,
             rollbacks_per_sec: src.value.rollbacks_per_sec,
@@ -182,7 +191,50 @@ impl StatementSnapshotModel {
     }
 }
 
-/// Exactly one of the three series is populated per request — the one named by
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
+pub struct LongestQueryPointModel {
+    pub pid: Option<i64>,
+    pub query_start: Option<String>,
+    pub user_name: Option<String>,
+    pub application_name: Option<String>,
+    pub wait: Option<String>,
+    // The longest any 5-second tick saw this execution run for.
+    pub running_secs: f64,
+    pub query: Option<String>,
+}
+
+/// One hour's top-5 longest-running statements, longest first.
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
+pub struct LongestQuerySnapshotModel {
+    // End of the hour these were observed in.
+    pub at: String,
+    pub items: Vec<LongestQueryPointModel>,
+}
+
+impl LongestQuerySnapshotModel {
+    fn new(src: HistoryRow<Vec<LongestQuerySample>>) -> Self {
+        Self {
+            at: src.at.to_rfc3339(),
+            items: src
+                .value
+                .into_iter()
+                .map(|item| LongestQueryPointModel {
+                    pid: item.pid.map(|pid| pid as i64),
+                    query_start: item.query_start,
+                    user_name: item.user_name,
+                    application_name: item.application_name,
+                    wait: item.wait,
+                    running_secs: item.running_secs,
+                    query: item.query,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Exactly one of the four series is populated per request — the one named by
 /// `section`. They are separate fields rather than one polymorphic list so the
 /// shape is statically known to both swagger and the UI mirror.
 #[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
@@ -198,6 +250,7 @@ pub struct HistoryModel {
     pub load: Vec<LoadPointModel>,
     pub tables: Vec<TableSizeSnapshotModel>,
     pub statements: Vec<StatementSnapshotModel>,
+    pub longest: Vec<LongestQuerySnapshotModel>,
 }
 
 impl HistoryModel {
@@ -217,6 +270,7 @@ impl HistoryModel {
             load: Vec::new(),
             tables: Vec::new(),
             statements: Vec::new(),
+            longest: Vec::new(),
         }
     }
 
@@ -234,6 +288,14 @@ impl HistoryModel {
         self.statements = rows
             .into_iter()
             .map(StatementSnapshotModel::new)
+            .collect();
+        self
+    }
+
+    pub fn with_longest(mut self, rows: Vec<HistoryRow<Vec<LongestQuerySample>>>) -> Self {
+        self.longest = rows
+            .into_iter()
+            .map(LongestQuerySnapshotModel::new)
             .collect();
         self
     }

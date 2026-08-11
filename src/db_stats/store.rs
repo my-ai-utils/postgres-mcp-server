@@ -63,6 +63,7 @@ const PATH_ENV: &str = "POSTGRES_MCP_METRICS_PATH";
 const LOAD: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("load_samples");
 const TABLE_SIZES: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("table_samples");
 const STATEMENTS: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("statement_samples");
+const LONGEST: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("longest_samples");
 
 /// One 5-second sample of how hard the database is working.
 ///
@@ -196,6 +197,42 @@ impl StatementLoadSample {
     }
 }
 
+/// One of the hour's longest-running statements, as history.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LongestQuerySample {
+    pub pid: Option<i32>,
+    pub query_start: Option<String>,
+    pub user_name: Option<String>,
+    pub application_name: Option<String>,
+    pub wait: Option<String>,
+    pub running_secs: f64,
+    pub query: Option<String>,
+}
+
+impl LongestQuerySample {
+    /// The whole top-5 goes under one key, like the table and statement lists — a
+    /// reader wants the hour's picture, not five separate rows to reassemble.
+    fn list(seen: Vec<super::LongestSeen>) -> Option<Vec<Self>> {
+        if seen.is_empty() {
+            return None;
+        }
+
+        Some(
+            seen.into_iter()
+                .map(|src| Self {
+                    pid: src.pid,
+                    query_start: src.query_start,
+                    user_name: src.user_name,
+                    application_name: src.application_name,
+                    wait: src.wait,
+                    running_secs: src.running_secs,
+                    query: src.query,
+                })
+                .collect(),
+        )
+    }
+}
+
 /// The last error a background writer hit, if any.
 ///
 /// History writing happens on a timer with no request to fail, so an error has
@@ -230,11 +267,12 @@ pub struct GarbageCollected {
     pub load: usize,
     pub table_sizes: usize,
     pub statements: usize,
+    pub longest: usize,
 }
 
 impl GarbageCollected {
     pub fn total(&self) -> usize {
-        self.load + self.table_sizes + self.statements
+        self.load + self.table_sizes + self.statements + self.longest
     }
 }
 
@@ -336,14 +374,14 @@ impl MetricsStore {
         self.write(LOAD, at, rows).await
     }
 
-    /// The hourly pair. Both lists are written in the same transaction so an
-    /// interrupted sweep cannot leave a table-size row with no statements row
-    /// beside it.
+    /// The hourly rows. All three are written in one transaction, so an interrupted
+    /// sweep cannot leave an hour with table sizes but no statements beside them.
     pub async fn write_hourly(
         &self,
         at: DateTimeAsMicroseconds,
         tables: &Section<TablesStats>,
         statements: &Section<TopStatements>,
+        longest: Vec<super::LongestSeen>,
         db_path: &str,
     ) -> Result<(), String> {
         let Some(db) = self.db.clone() else {
@@ -360,7 +398,12 @@ impl MetricsStore {
             .transpose()
             .map_err(|err| format!("Could not encode the statements: {}", err))?;
 
-        if table_sizes.is_none() && statements.is_none() {
+        let longest = LongestQuerySample::list(longest)
+            .map(|list| serde_json::to_vec(&list))
+            .transpose()
+            .map_err(|err| format!("Could not encode the longest queries: {}", err))?;
+
+        if table_sizes.is_none() && statements.is_none() && longest.is_none() {
             return Ok(());
         }
 
@@ -371,15 +414,16 @@ impl MetricsStore {
             let write = db.begin_write().map_err(to_string)?;
 
             {
-                if let Some(payload) = table_sizes {
-                    let mut table = write.open_table(TABLE_SIZES).map_err(to_string)?;
-                    table
-                        .insert((at, db_path.as_str()), payload.as_slice())
-                        .map_err(to_string)?;
-                }
+                for (definition, payload) in [
+                    (TABLE_SIZES, table_sizes),
+                    (STATEMENTS, statements),
+                    (LONGEST, longest),
+                ] {
+                    let Some(payload) = payload else {
+                        continue;
+                    };
 
-                if let Some(payload) = statements {
-                    let mut table = write.open_table(STATEMENTS).map_err(to_string)?;
+                    let mut table = write.open_table(definition).map_err(to_string)?;
                     table
                         .insert((at, db_path.as_str()), payload.as_slice())
                         .map_err(to_string)?;
@@ -418,6 +462,16 @@ impl MetricsStore {
         self.read(STATEMENTS, from, to, db_path).await
     }
 
+    /// Each row is one hour's top-5 longest-running statements, longest first.
+    pub async fn read_longest(
+        &self,
+        from: DateTimeAsMicroseconds,
+        to: DateTimeAsMicroseconds,
+        db_path: &str,
+    ) -> Result<Vec<HistoryRow<Vec<LongestQuerySample>>>, String> {
+        self.read(LONGEST, from, to, db_path).await
+    }
+
     /// Deletes everything older than [`RETENTION`], across every database and
     /// every table, in one transaction.
     pub async fn collect_garbage(&self) -> Result<GarbageCollected, String> {
@@ -445,6 +499,7 @@ impl MetricsStore {
                     load: delete_older_than(&write, LOAD, cutoff)?,
                     table_sizes: delete_older_than(&write, TABLE_SIZES, cutoff)?,
                     statements: delete_older_than(&write, STATEMENTS, cutoff)?,
+                    longest: delete_older_than(&write, LONGEST, cutoff)?,
                 }
             };
 
@@ -557,6 +612,7 @@ fn open_and_init(path: &str) -> Result<Database, String> {
         write.open_table(LOAD).map_err(to_string)?;
         write.open_table(TABLE_SIZES).map_err(to_string)?;
         write.open_table(STATEMENTS).map_err(to_string)?;
+        write.open_table(LONGEST).map_err(to_string)?;
     }
 
     write.commit().map_err(to_string)?;
@@ -822,8 +878,18 @@ mod tests {
             }],
         });
 
+        let longest = vec![super::super::LongestSeen {
+            pid: Some(99),
+            query_start: Some("2026-08-11T10:00:00+00:00".to_string()),
+            user_name: Some("reader".to_string()),
+            application_name: None,
+            wait: Some("Lock: transactionid".to_string()),
+            running_secs: 312.5,
+            query: Some("UPDATE accumulator_values SET x = $1".to_string()),
+        }];
+
         store
-            .write_hourly(at(5_000), &tables, &statements, "/mcp")
+            .write_hourly(at(5_000), &tables, &statements, longest, "/mcp")
             .await
             .unwrap();
 
@@ -845,6 +911,18 @@ mod tests {
         assert_eq!(costs[0].value[0].query_id.as_deref(), Some("42"));
         assert_eq!(costs[0].value[0].exec_ms_per_sec, Some(1.7));
 
+        // All three hourly lists share one timestamp, written in one transaction.
+        let slowest = store
+            .read_longest(at(4_999), at(5_001), "/mcp")
+            .await
+            .unwrap();
+        assert_eq!(slowest.len(), 1);
+        assert_eq!(slowest[0].value[0].running_secs, 312.5);
+        assert_eq!(
+            slowest[0].value[0].wait.as_deref(),
+            Some("Lock: transactionid")
+        );
+
         let _ = std::fs::remove_file(path.as_str());
     }
 
@@ -858,13 +936,26 @@ mod tests {
         assert!(LoadSample::new(&Section::Pending, &Section::Pending).is_none());
 
         store
-            .write_hourly(at(6_000), &Section::Pending, &Section::Pending, "/mcp")
+            .write_hourly(
+                at(6_000),
+                &Section::Pending,
+                &Section::Pending,
+                Vec::new(),
+                "/mcp",
+            )
             .await
             .unwrap();
 
         assert!(
             store
                 .read_table_sizes(at(0), at(9_999), "/mcp")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .read_longest(at(0), at(9_999), "/mcp")
                 .await
                 .unwrap()
                 .is_empty()

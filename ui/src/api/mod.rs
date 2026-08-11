@@ -28,7 +28,7 @@ use flurl::{FlUrl, FlUrlError, FlUrlResponse};
 use serde::de::DeserializeOwned;
 
 use crate::models::{
-    RequestError, ServerSettings, ServerStats, SetMcpWritesRequest, SqlRequestModel,
+    LoadHistory, RequestError, ServerSettings, ServerStats, SetMcpWritesRequest, SqlRequestModel,
     SqlRequestsResponse,
 };
 
@@ -105,6 +105,23 @@ pub async fn set_mcp_writes(path: String, enabled: bool) -> Result<(), RequestEr
 /// A pure cache read on the server side — polling this does not query Postgres.
 pub async fn get_server_stats() -> Result<ServerStats, RequestError> {
     let response = FlUrl::new("/api/Stats").get().await;
+
+    handle_http_response(response).await
+}
+
+/// The recorded 5-second load samples of one database, oldest first.
+///
+/// One request per database: the history is keyed per mount, and each database gets
+/// its own panel rather than being added into a server total — see `LoadCharts`.
+pub async fn get_load_history(path: &str, hours: i64) -> Result<LoadHistory, RequestError> {
+    // FlUrl builds the query string, so a path like "/mcp-reporting" is escaped
+    // rather than concatenated into the URL by hand.
+    let response = FlUrl::new("/api/Stats/History")
+        .append_query_param("path", Some(path.to_string()))
+        .append_query_param("hours", Some(hours.to_string()))
+        .append_query_param("section", Some("load".to_string()))
+        .get()
+        .await;
 
     handle_http_response(response).await
 }

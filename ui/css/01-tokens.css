@@ -34,6 +34,16 @@
     --reader: var(--accent);
     --reader-soft: var(--accent-soft);
 
+    /* Chart marks get their own token rather than reusing --accent, which is tuned
+       for text and links. One hue is enough because each database gets its own
+       panel: identity is carried by the panel title, not by colour. Both modes were
+       checked against their own surface with the palette validator — lightness band,
+       chroma floor, contrast — rather than picked by eye. */
+    --chart-line: #8c68cd;
+    --chart-fill: rgba(140, 104, 205, 0.16);
+    --chart-grid: #e4e6ee;
+    --chart-threshold: #d99826;
+
     --r-sm: 4px;
     --r-md: 6px;
     --r-lg: 10px;
@@ -73,6 +83,14 @@
     --writer-soft: var(--info-soft);
     --reader: var(--accent);
     --reader-soft: var(--accent-soft);
+
+    /* Re-stepped for the dark surface, not flipped: the light accent #8c68cd and the
+       UI's dark accent #b298ee both fail the dark lightness band (0.48–0.67), the
+       latter at L 0.736. */
+    --chart-line: #a17ce8;
+    --chart-fill: rgba(161, 124, 232, 0.20);
+    --chart-grid: #232c4a;
+    --chart-threshold: #e0a64a;
 }
 
 /* === Reset / base === */

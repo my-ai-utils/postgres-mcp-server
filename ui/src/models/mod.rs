@@ -1,6 +1,10 @@
 mod db_stats;
 pub use db_stats::*;
 
+mod history;
+pub use history::*;
+
+
 mod request_error;
 pub use request_error::*;
 

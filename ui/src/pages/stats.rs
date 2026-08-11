@@ -2,17 +2,25 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
-use crate::components::Topbar;
 use crate::components::atoms::{StatePill, StateTone};
+use crate::components::{LoadChartPoint, LoadCharts, LoadSeries, Topbar};
 use crate::models::{
-    Activity, DatabaseStats, Health, HistoryInfo, Load, ServerInfo, ServerSettings, ServerStats,
-    Tables, fmt, section,
+    Activity, DatabaseStats, Health, HistoryInfo, Load, ServerInfo, ServerRef, ServerSettings,
+    ServerStats, Tables, fmt, section,
 };
 
 /// Slower than the requests page's 1s: nothing here moves faster than the
 /// collector's 5-second tick, so polling more often would only spend battery
 /// re-rendering identical numbers.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The chart window — the last hour.
+const CHART_HOURS: i64 = 1;
+
+/// The panels are redrawn on their own, slower clock: an hour of 5-second samples is
+/// ~720 points per database, and at the page's cadence it would be re-fetched twelve
+/// times before a single new point could change the shape.
+const CHART_REFRESH: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct StatsState {
@@ -22,10 +30,52 @@ pub struct StatsState {
     /// "writes off" just because this page does not track them would be worse than
     /// one extra small request per tick.
     settings: ServerSettings,
+    /// Which server is on screen. `None` until the first poll names one.
+    ///
+    /// Kept as the key rather than an index: the settings file can gain a database
+    /// while the page is open, and an index would silently point at a different
+    /// server when the list shifts.
+    selected_server: Option<String>,
+    /// One entry per database of the selected server — never summed; see
+    /// [`LoadCharts`] for why.
+    chart: Vec<LoadSeries>,
+    /// Which server `chart` belongs to, so a switch mid-fetch cannot leave one
+    /// server's panels under another's heading.
+    chart_server: Option<String>,
+    chart_from_ms: i64,
+    chart_to_ms: i64,
+    /// Why there is nothing to draw at all. Starts as "loading" rather than "no
+    /// data": the first fetch takes a moment, and an empty card claiming there is
+    /// nothing recorded would be wrong for that moment.
+    chart_note: String,
     /// Why the last poll failed, if it did. Kept alongside the previous values
     /// rather than replacing them — a page that blanks on one dropped request is
     /// worse than a page that says "this is a few seconds stale".
     error: Option<String>,
+}
+
+impl StatsState {
+    /// A fresh page has not fetched anything yet — say so, rather than claiming the
+    /// database has recorded nothing.
+    fn new() -> Self {
+        Self {
+            chart_note: "Loading…".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The server whose section is shown, falling back to the first configured one.
+    fn current_server(&self) -> Option<ServerRef> {
+        let servers = self.stats.servers();
+
+        if let Some(selected) = self.selected_server.as_deref() {
+            if let Some(found) = servers.iter().find(|server| server.key == selected) {
+                return Some(found.clone());
+            }
+        }
+
+        servers.into_iter().next()
+    }
 }
 
 async fn poll_once(mut cs: Signal<StatsState>) {
@@ -56,6 +106,121 @@ async fn poll_once(mut cs: Signal<StatsState>) {
     if let Some(settings) = settings {
         write.settings = settings;
     }
+}
+
+/// Rebuilds the panels for whichever server is selected — **one per database, never
+/// summed**.
+///
+/// Two mounts can open the same database, in which case they read the very same
+/// `pg_stat_database` counters. Their series are identical, so the second is marked
+/// as a copy instead of being drawn as if it were more load.
+async fn refresh_chart(mut cs: Signal<StatsState>) {
+    let Some(server) = cs.peek().current_server() else {
+        // No server yet means the first stats poll has not landed. Leave the note as
+        // it is — the poller will call back here.
+        return;
+    };
+
+    // Captured before the awaits below: the operator can switch servers while these
+    // requests are in flight, and applying a stale result would put one server's
+    // panels under another's heading.
+    let requested = server.key.clone();
+
+    let databases = cs.peek().stats.databases_on(requested.as_str());
+
+    let mut series: Vec<LoadSeries> = Vec::with_capacity(databases.len());
+    let mut seen_databases: Vec<(String, String)> = Vec::new();
+
+    for db in &databases {
+        // Same database as an earlier mount? Then this line is that line.
+        let duplicate_of = db.server.database_key.as_ref().and_then(|key| {
+            seen_databases
+                .iter()
+                .find(|(seen, _)| seen == key)
+                .map(|(_, path)| path.clone())
+        });
+
+        if let Some(key) = db.server.database_key.clone() {
+            seen_databases.push((key, db.path.clone()));
+        }
+
+        let (points, note) = match crate::api::get_load_history(db.path.as_str(), CHART_HOURS).await
+        {
+            Ok(history) => {
+                let points: Vec<LoadChartPoint> = history
+                    .load
+                    .iter()
+                    // A sample with no busy figure — Postgres older than 14, or the
+                    // first tick after a stats reset — is left out rather than
+                    // plotted as zero, which would read as "idle".
+                    .filter_map(|point| {
+                        point.busy_backends.map(|value| LoadChartPoint {
+                            at_unix_ms: point.at_unix_ms,
+                            value,
+                        })
+                    })
+                    .collect();
+
+                let note = history.error.or_else(|| {
+                    if points.is_empty() {
+                        Some(
+                            "Nothing recorded yet — this needs Postgres 14+, and the first \
+                             figure appears one tick after start-up."
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                });
+
+                (points, note)
+            }
+            Err(err) => {
+                dioxus_utils::console_log(format!("Load history for {} failed: {}", db.path, err));
+                (Vec::new(), Some(err.to_string()))
+            }
+        };
+
+        series.push(LoadSeries {
+            description: db.description.clone(),
+            path: db.path.clone(),
+            points,
+            note,
+            duplicate_of,
+        });
+    }
+
+    // The window is anchored to the newest sample across the panels rather than to
+    // the browser's clock: the two can differ by minutes, and an axis ending in the
+    // future would squeeze a live chart into the left of the card.
+    let to_ms = series
+        .iter()
+        .filter_map(|s| s.points.last().map(|point| point.at_unix_ms))
+        .max()
+        .unwrap_or(0);
+
+    let note = if series.is_empty() {
+        "No database is configured on this server.".to_string()
+    } else {
+        series
+            .iter()
+            .find_map(|s| s.note.clone())
+            .unwrap_or_else(|| "Nothing recorded yet.".to_string())
+    };
+
+    let mut write = cs.write();
+
+    // Dropped on the floor if the operator switched servers while this was in
+    // flight; the switch schedules its own refresh.
+    if write.current_server().map(|server| server.key).as_deref() != Some(requested.as_str()) {
+        return;
+    }
+
+    write.chart = series;
+    write.chart_server = Some(requested);
+    write.chart_from_ms = to_ms - CHART_HOURS * 60 * 60 * 1_000;
+    write.chart_to_ms = to_ms;
+    write.chart_note = note;
 }
 
 /// Tone for a fill ratio: fine until it is most of the way there.
@@ -211,10 +376,10 @@ fn LoadTiles(health: Health, activity: Activity) -> Element {
             StatTile {
                 label: "Busy backends".to_string(),
                 value: fmt::float(busy, 2),
-                hint: "≈ CPU proxy".to_string(),
+                hint: "executing".to_string(),
                 tone: busy_tone(busy),
                 title: Some(
-                    "Backend-seconds of execution per wall-clock second, from pg_stat_database.active_time. 1.00 means one backend was executing continuously. Postgres exposes no host CPU metric, so this is a proxy: it counts I/O and lock waits as busy and knows nothing about other processes on the machine. Requires Postgres 14+."
+                    "Backend-seconds of execution per wall-clock second in this database, from pg_stat_database.active_time. 1.00 means one backend was executing continuously; 3.00 means three were, on average. Not a CPU figure: a backend waiting on disk or on a lock still counts as executing, and this sees only this database. active_time is credited when a backend reports its state, so a single very long query shows up late rather than continuously. Requires Postgres 14+."
                         .to_string(),
                 ),
             }
@@ -452,7 +617,11 @@ fn TablesCard(tables: Tables) -> Element {
                         th { class: "num", title: "Heap + TOAST, without indexes", "Data" }
                         th { class: "num", "Indexes" }
                         th { class: "num", title: "Planner estimate, not count(*)", "Live rows" }
-                        th { class: "num", "Dead" }
+                        th {
+                            class: "num",
+                            title: "Row versions left behind by UPDATE and DELETE. Postgres does not overwrite a row — it writes a new version and marks the old one dead — so these keep occupying space, and every scan reads past them, until VACUUM reclaims it.",
+                            "Dead rows"
+                        }
                         th { class: "num", "Seq scans" }
                         th { class: "num", "Idx scans" }
                         th { "Last vacuum" }
@@ -626,15 +795,93 @@ fn HistoryBar(history: HistoryInfo, error: Option<String>) -> Element {
     }
 }
 
+/// Switches between Postgres servers.
+///
+/// Rendered only when there is more than one: several `databases:` entries usually
+/// point at the same server, and with one server there is nothing to switch — a
+/// lone tab would be a control that does nothing.
+#[component]
+fn ServerSwitch(cs: Signal<StatsState>, servers: Vec<ServerRef>, current: String) -> Element {
+    if servers.len() < 2 {
+        return rsx! {};
+    }
+
+    let tabs: Vec<Element> = servers
+        .iter()
+        .map(|server| {
+            let key = server.key.clone();
+            let is_active = key == current;
+            let databases = cs.read().stats.databases_on(key.as_str()).len();
+
+            rsx! {
+                button {
+                    key: "{server.key}",
+                    class: if is_active { "server-tab server-tab--active" } else { "server-tab" },
+                    onclick: move |_| select_server(cs, key.clone()),
+                    span { class: "server-tab__label", "{server.label}" }
+                    span { class: "server-tab__count mono", "{databases}" }
+                }
+            }
+        })
+        .collect();
+
+    rsx! {
+        div { class: "server-switch",
+            span { class: "server-switch__caption", "Server" }
+            div { class: "server-switch__tabs", {tabs.into_iter()} }
+        }
+    }
+}
+
+/// Selects a server, remembers it, and redraws its panels straight away rather than
+/// leaving the previous server's on screen until the 30-second clock comes round.
+fn select_server(mut cs: Signal<StatsState>, key: String) {
+    crate::storage::save_selected_server(key.as_str());
+
+    {
+        let mut write = cs.write();
+        write.selected_server = Some(key);
+        // Clear rather than keep: the panels on screen belong to the server being
+        // left, and showing them under the new heading would be wrong for as long as
+        // the fetch takes.
+        write.chart = Vec::new();
+        write.chart_server = None;
+        write.chart_note = "Loading…".to_string();
+    }
+
+    spawn(async move {
+        refresh_chart(cs).await;
+    });
+}
+
 #[component]
 pub fn Stats() -> Element {
-    let cs = use_signal(StatsState::default);
+    let cs = use_signal(StatsState::new);
 
     use_hook(move || {
+        // The last server looked at, so a reload does not drop the operator back on
+        // whichever one the settings file happens to declare first.
+        if let Some(saved) = crate::storage::load_selected_server() {
+            cs.clone().write().selected_server = Some(saved);
+        }
+
+        spawn(async move {
+            // The first stats poll is what names a server, so the panels are fetched
+            // right after it rather than on their own clock — otherwise the card sits
+            // empty for the first 30 seconds of every visit.
+            poll_once(cs).await;
+            refresh_chart(cs).await;
+
+            loop {
+                dioxus_utils::js::sleep(POLL_INTERVAL).await;
+                poll_once(cs).await;
+            }
+        });
+
         spawn(async move {
             loop {
-                poll_once(cs).await;
-                dioxus_utils::js::sleep(POLL_INTERVAL).await;
+                dioxus_utils::js::sleep(CHART_REFRESH).await;
+                refresh_chart(cs).await;
             }
         });
     });
@@ -644,9 +891,19 @@ pub fn Stats() -> Element {
     let writes_enabled_count = cs_ra.settings.writes_enabled_count();
     let databases_count = cs_ra.settings.databases.len();
 
-    let sections: Vec<Element> = cs_ra
-        .stats
-        .databases
+    let servers = cs_ra.stats.servers();
+    let current = cs_ra.current_server();
+    let current_key = current
+        .as_ref()
+        .map(|server| server.key.clone())
+        .unwrap_or_default();
+
+    let shown: Vec<DatabaseStats> = match current.as_ref() {
+        Some(server) => cs_ra.stats.databases_on(server.key.as_str()),
+        None => Vec::new(),
+    };
+
+    let sections: Vec<Element> = shown
         .iter()
         .map(|db| {
             rsx! {
@@ -671,11 +928,43 @@ pub fn Stats() -> Element {
         }
     };
 
+    let chart_subtitle = match current.as_ref() {
+        Some(server) => format!("last hour · {}", server.label),
+        None => "last hour".to_string(),
+    };
+
     rsx! {
         div { class: "shell",
             Topbar { writes_enabled_count, databases_count }
             section { class: "page page--padded",
                 div { style: "display: flex; flex-direction: column; gap: 18px;",
+
+                    ServerSwitch { cs, servers, current: current_key }
+
+                    div { class: "card",
+                        div { class: "card__header",
+                            span { class: "card__title", "Execution load" }
+                            span { class: "card__subtitle", "{chart_subtitle}" }
+                        }
+                        div { class: "card__body",
+                            p { class: "muted", style: "margin: 0 0 12px; font-size: 12.5px;",
+                                "Backend-seconds of execution per wall-clock second, "
+                                b { "per database" }
+                                " — Postgres keeps this in "
+                                code { class: "mono", "pg_stat_database" }
+                                ", which has a row per database and no cluster-wide equivalent, so "
+                                "there is nothing here to add up. Not a CPU figure: a backend waiting "
+                                "on disk or on a lock still counts as executing."
+                            }
+                            LoadCharts {
+                                series: cs_ra.chart.clone(),
+                                from_unix_ms: cs_ra.chart_from_ms,
+                                to_unix_ms: cs_ra.chart_to_ms,
+                                empty_note: cs_ra.chart_note.clone(),
+                            }
+                        }
+                    }
+
                     HistoryBar { history: cs_ra.stats.history.clone(), error: cs_ra.error.clone() }
                     {body}
                 }

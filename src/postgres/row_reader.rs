@@ -37,6 +37,14 @@ pub fn opt_string(row: &Row, name: &str) -> Option<String> {
     row.try_get::<_, Option<String>>(name).ok().flatten()
 }
 
+/// A `json`/`jsonb` column. Used for `EXPLAIN (FORMAT JSON)`, whose whole result
+/// is one such column.
+pub fn opt_json(row: &Row, name: &str) -> Option<serde_json::Value> {
+    row.try_get::<_, Option<serde_json::Value>>(name)
+        .ok()
+        .flatten()
+}
+
 /// A `timestamptz` column as RFC 3339.
 ///
 /// Rendered here rather than downstream because everything that consumes these

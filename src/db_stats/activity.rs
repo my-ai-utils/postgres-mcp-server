@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use my_postgres::tokio_postgres::Row;
 
-use crate::postgres::{PostgresAccess, opt_f64, opt_i32, opt_i64, opt_string, stats_row};
+use crate::postgres::{
+    PostgresAccess, opt_f64, opt_i32, opt_i64, opt_string, opt_timestamp, stats_row,
+};
 
 /// `pg_stat_activity.backend_type` — the column that separates real client
 /// connections from autovacuum workers and the WAL writer. Without it the
@@ -15,10 +17,14 @@ const PG10: i32 = 100000;
 pub struct ActivityStats {
     /// Client backends across the **whole cluster** — this is what competes for
     /// `max_connections`, so counting only this database would understate the
-    /// pressure.
+    /// pressure. Includes this server's own collector connection, which does hold a
+    /// slot.
     pub total_client_backends: Option<i64>,
     /// Client backends on this database alone.
     pub in_this_db: Option<i64>,
+    /// The four counts below are **this database only**, and all exclude the
+    /// collector's own backend — see [`counts_sql`]. They therefore do not add up
+    /// to `in_this_db`, and are not meant to.
     pub active: Option<i64>,
     pub idle: Option<i64>,
     /// `idle in transaction` and `idle in transaction (aborted)`. These hold
@@ -27,7 +33,7 @@ pub struct ActivityStats {
     pub idle_in_transaction: Option<i64>,
     /// Active backends currently blocked on a wait event.
     pub waiting: Option<i64>,
-    /// Client backends whose `state` came back NULL.
+    /// Backends on this database whose `state` came back NULL.
     ///
     /// Postgres returns a row for every backend but blanks `state`, `query` and
     /// `wait_event` for backends belonging to other users unless the account is a
@@ -48,6 +54,13 @@ pub struct ActivityStats {
 #[derive(Debug, Clone)]
 pub struct LongRunningQuery {
     pub pid: Option<i32>,
+    /// When this statement started.
+    ///
+    /// Carried so that the same execution seen across several 5-second ticks can be
+    /// recognised as one. `pid` alone is not enough — Postgres hands the same
+    /// backend to the next statement, so two unrelated executions would collapse
+    /// into one; `(pid, query_start)` identifies an execution.
+    pub query_start: Option<String>,
     pub user_name: Option<String>,
     pub application_name: Option<String>,
     pub state: Option<String>,
@@ -57,6 +70,15 @@ pub struct LongRunningQuery {
     pub running_secs: Option<f64>,
     /// `None` when this account may not read another user's query text.
     pub query: Option<String>,
+}
+
+impl LongRunningQuery {
+    /// Identity of one *execution*, for deduplicating across ticks. `None` when
+    /// either half is missing, in which case the caller cannot safely merge it with
+    /// anything and should treat it as its own sighting.
+    pub fn execution_key(&self) -> Option<(i32, String)> {
+        Some((self.pid?, self.query_start.clone()?))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +117,7 @@ impl LongRunningQuery {
 
         Self {
             pid: opt_i32(row, "pid"),
+            query_start: opt_timestamp(row, "query_start"),
             user_name: opt_string(row, "user_name"),
             application_name: opt_string(row, "application_name"),
             state: opt_string(row, "state"),
@@ -111,10 +134,29 @@ impl LongRunningQuery {
 
 stats_row!(LongRunningQuery);
 
-/// The `backend_type` filter is what makes these counts comparable to
+/// The `backend_type` filter is what makes the totals comparable to
 /// `max_connections`; on a server too old to have the column everything is
 /// counted instead, which overstates the total by the handful of background
 /// processes rather than dropping the section.
+///
+/// # Two scopes in one row, on purpose
+///
+/// `pg_stat_activity` is cluster-wide, and the two scopes answer different
+/// questions, so both are collected and each is named for what it is:
+///
+/// - `total_client_backends` is **cluster-wide**, because that is what competes for
+///   `max_connections`. Counting only this database would understate the pressure
+///   that actually causes "too many clients already".
+/// - the state breakdown is **this database only**. It is published on a
+///   per-database card next to that database's tables and longest queries, and a
+///   cluster-wide `active` there would contradict the very list under it.
+///
+/// # Why the state counts exclude our own backend
+///
+/// This query runs from a connection which is, at that instant, `active` — running
+/// this query. Counted, it would report at least one active backend on every tick,
+/// forever, on a completely idle database: the metric observing itself. It is still
+/// counted in the totals, because it does hold a real connection slot.
 fn counts_sql(server_version_num: i32) -> String {
     let client_backends = if server_version_num >= PG10 {
         "a.backend_type = 'client backend'"
@@ -122,21 +164,26 @@ fn counts_sql(server_version_num: i32) -> String {
         "true"
     };
 
+    // Every state count is scoped to this database AND excludes the collector.
+    let here = "a.datname = current_database() AND a.pid <> pg_backend_pid()";
+
     format!(
         r#"
 SELECT
-    (count(*))::int8                                                                  AS total_client_backends,
-    (count(*) FILTER (WHERE a.datname = current_database()))::int8                     AS in_this_db,
-    (count(*) FILTER (WHERE a.state = 'active'))::int8                                 AS active,
-    (count(*) FILTER (WHERE a.state = 'idle'))::int8                                   AS idle,
-    (count(*) FILTER (WHERE a.state LIKE 'idle in transaction%'))::int8                AS idle_in_transaction,
-    (count(*) FILTER (WHERE a.state = 'active' AND a.wait_event_type IS NOT NULL))::int8 AS waiting,
-    (count(*) FILTER (WHERE a.state IS NULL))::int8                                    AS state_unknown,
-    current_setting('max_connections')::int8                                           AS max_connections
+    (count(*))::int8                                                                      AS total_client_backends,
+    (count(*) FILTER (WHERE a.datname = current_database()))::int8                         AS in_this_db,
+    (count(*) FILTER (WHERE {here} AND a.state = 'active'))::int8                          AS active,
+    (count(*) FILTER (WHERE {here} AND a.state = 'idle'))::int8                            AS idle,
+    (count(*) FILTER (WHERE {here} AND a.state LIKE 'idle in transaction%'))::int8         AS idle_in_transaction,
+    (count(*) FILTER (WHERE {here} AND a.state = 'active'
+                        AND a.wait_event_type IS NOT NULL))::int8                          AS waiting,
+    (count(*) FILTER (WHERE {here} AND a.state IS NULL))::int8                             AS state_unknown,
+    current_setting('max_connections')::int8                                               AS max_connections
 FROM pg_stat_activity a
-WHERE {}
+WHERE {client_backends}
 "#,
-        client_backends
+        here = here,
+        client_backends = client_backends
     )
 }
 
@@ -148,6 +195,7 @@ WHERE {}
 const LONGEST_SQL: &str = r#"
 SELECT
     a.pid                                                        AS pid,
+    a.query_start                                                AS query_start,
     a.usename::text                                              AS user_name,
     a.application_name                                           AS application_name,
     a.state                                                      AS state,

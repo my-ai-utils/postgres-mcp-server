@@ -397,6 +397,45 @@ impl DbStatsModel {
     }
 }
 
+/// Which Postgres server a mount talks to.
+///
+/// Derived from the connection string, and carrying **only** host, port and the
+/// SSH target — never the credentials, since this goes to an unauthenticated API.
+/// See [`crate::settings::ServerEndpoint`].
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerEndpointModel {
+    // Stable id: mounts sharing it are on the same server. The UI groups and
+    // switches by this.
+    pub key: String,
+    // What the operator sees, e.g. "db.internal" or "db:6432 (via ssh deploy@h:22)".
+    pub label: String,
+    pub host: String,
+    pub port: i64,
+    // The database this mount opens, from the connection string.
+    pub database: Option<String>,
+    // Server + database. Two mounts sharing this open the SAME database, and so read
+    // the very same pg_stat_database counters — anything that treats them as two
+    // independent sources counts that database twice. `null` when the connection
+    // string does not name a database (libpq then falls back to the user name), in
+    // which case sameness cannot be proven from configuration and callers must treat
+    // the mounts as distinct rather than guess.
+    pub database_key: Option<String>,
+}
+
+impl ServerEndpointModel {
+    fn new(src: &crate::settings::ServerEndpoint) -> Self {
+        Self {
+            key: src.key(),
+            label: src.label(),
+            host: src.host.clone(),
+            port: src.port as i64,
+            database: src.dbname.clone(),
+            database_key: src.database_key(),
+        }
+    }
+}
+
 /// A database's statistics plus the mount that identifies it — the admin API's
 /// row shape. The admin sees every mount; an MCP endpoint sees only
 /// [`DbStatsModel`].
@@ -406,6 +445,8 @@ pub struct DatabaseStatsModel {
     // MCP mount path, e.g. "/mcp".
     pub path: String,
     pub description: String,
+    // Which server this database lives on. Several mounts commonly share one.
+    pub server: ServerEndpointModel,
     pub stats: DbStatsModel,
 }
 
@@ -456,6 +497,7 @@ impl StatsModel {
                 .map(|db| DatabaseStatsModel {
                     path: db.path.as_str().to_string(),
                     description: db.description.clone(),
+                    server: ServerEndpointModel::new(&db.server),
                     stats: DbStatsModel::new(db.stats.get().as_ref()),
                 })
                 .collect(),
