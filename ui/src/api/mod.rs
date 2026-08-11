@@ -28,8 +28,8 @@ use flurl::{FlUrl, FlUrlError, FlUrlResponse};
 use serde::de::DeserializeOwned;
 
 use crate::models::{
-    LoadHistory, RequestError, ServerSettings, ServerStats, SetMcpWritesRequest, SqlRequestModel,
-    SqlRequestsResponse,
+    LoadHistory, RequestError, ServerSettings, ServerStats, SetMcpWritesRequest,
+    SetTrackIoTimingRequest, SqlRequestModel, SqlRequestsResponse, TrackIoTimingResult,
 };
 
 fn is_success(status: u16) -> bool {
@@ -105,6 +105,27 @@ pub async fn set_mcp_writes(path: String, enabled: bool) -> Result<(), RequestEr
 /// A pure cache read on the server side — polling this does not query Postgres.
 pub async fn get_server_stats() -> Result<ServerStats, RequestError> {
     let response = FlUrl::new("/api/Stats").get().await;
+
+    handle_http_response(response).await
+}
+
+/// Turns `track_io_timing` on or off on the Postgres server behind `path`.
+///
+/// A `Ok(result)` with `ok: false` is the normal way a refusal arrives — Postgres
+/// declining (not superuser, or the statement not being allowed here) is an answer
+/// worth showing, not a failed request.
+pub async fn set_track_io_timing(
+    path: &str,
+    enabled: bool,
+) -> Result<TrackIoTimingResult, RequestError> {
+    let body = SetTrackIoTimingRequest {
+        path: path.to_string(),
+        enabled,
+    };
+
+    let response = FlUrl::new("/api/Settings/TrackIoTiming")
+        .post(HttpRequestBody::as_json(&body))
+        .await;
 
     handle_http_response(response).await
 }

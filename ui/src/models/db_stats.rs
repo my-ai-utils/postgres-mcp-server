@@ -678,3 +678,25 @@ impl ServerStats {
             .collect()
     }
 }
+
+/// Body of `POST /api/Settings/TrackIoTiming`.
+#[derive(serde::Serialize)]
+pub struct SetTrackIoTimingRequest {
+    pub path: String,
+    pub enabled: bool,
+}
+
+/// What the server reports after the attempt.
+///
+/// `enabled` is what the *server* says afterwards, not what was asked for —
+/// `ALTER SYSTEM` only edits a file, so a request that did not error is still not
+/// proof the setting is on.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackIoTimingResult {
+    pub ok: bool,
+    pub enabled: Option<bool>,
+    /// Postgres' own message. "must be superuser" and "cannot run inside a
+    /// transaction block" need different fixes, so it is shown verbatim.
+    pub error: Option<String>,
+}

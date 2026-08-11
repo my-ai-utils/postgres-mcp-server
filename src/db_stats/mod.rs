@@ -70,6 +70,9 @@ pub use snapshot::*;
 mod statements;
 pub use statements::*;
 
+mod track_io_timing;
+pub use track_io_timing::*;
+
 mod store;
 pub use store::*;
 

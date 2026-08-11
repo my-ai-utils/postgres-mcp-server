@@ -1062,6 +1062,23 @@ textarea {
     color: var(--text);
 }
 
+.banner__actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+/* Postgres' own refusal, shown verbatim — "must be superuser" and "cannot run inside
+   a transaction block" need different fixes. */
+.banner__failure {
+    margin: 8px 0 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--danger);
+}
+
 .banner--bad {
     background: var(--danger-soft);
     border-color: var(--danger);

@@ -36,6 +36,22 @@ pub fn load_selected_server() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// The browser's own confirmation dialog.
+///
+/// Used rather than a hand-built modal because this is the one place in the UI where
+/// a click changes something outside this server — `ALTER SYSTEM` reaches the whole
+/// Postgres cluster. `window.confirm` blocks the page until it is answered, which is
+/// exactly the property wanted: no chance of the request going out while the operator
+/// is still reading what it does.
+///
+/// Returns `false` when there is no window to ask, so an environment without one
+/// cannot be a way to skip the question.
+pub fn confirm(message: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.confirm_with_message(message).ok())
+        .unwrap_or(false)
+}
+
 pub fn apply_theme(theme: &str) {
     if let Some(window) = web_sys::window() {
         if let Some(doc) = window.document() {

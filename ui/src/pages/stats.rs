@@ -48,6 +48,11 @@ pub struct StatsState {
     /// data": the first fetch takes a moment, and an empty card claiming there is
     /// nothing recorded would be wrong for that moment.
     chart_note: String,
+    /// Mount whose track_io_timing change is in flight, so only that card's buttons
+    /// go quiet.
+    io_timing_busy: Option<String>,
+    /// Why the last attempt failed — Postgres' own message.
+    io_timing_error: Option<String>,
     /// Why the last poll failed, if it did. Kept alongside the previous values
     /// rather than replacing them — a page that blanks on one dropped request is
     /// worse than a page that says "this is a few seconds stale".
@@ -695,8 +700,67 @@ fn TablesCard(tables: Tables) -> Element {
 /// The read half is per database; the write half (WAL, checkpoints) is a property of
 /// the whole server, and is labelled as such so nobody reads it as this database's
 /// alone.
+/// Asks, then applies. The confirmation spells out the two things that make this
+/// more than a display toggle: it reaches the whole cluster, and it needs superuser.
+fn toggle_track_io_timing(mut cs: Signal<StatsState>, path: String, enabled: bool) {
+    let question = if enabled {
+        format!(
+            "Turn track_io_timing ON?\n\nThis runs, on the server behind {}:\n\n  \
+             ALTER SYSTEM SET track_io_timing = on;\n  SELECT pg_reload_conf();\n\n\
+             It applies to the WHOLE Postgres server — every database on that cluster, \
+             including any this server is not configured for — and it needs superuser. \
+             No restart; the change takes effect on reload.",
+            path
+        )
+    } else {
+        format!(
+            "Turn track_io_timing OFF?\n\nThis runs, on the server behind {}:\n\n  \
+             ALTER SYSTEM SET track_io_timing = off;\n  SELECT pg_reload_conf();\n\n\
+             The I/O wait figures will stop being measured for every database on that \
+             cluster.",
+            path
+        )
+    };
+
+    if !crate::storage::confirm(question.as_str()) {
+        return;
+    }
+
+    cs.write().io_timing_busy = Some(path.clone());
+
+    spawn(async move {
+        let outcome = match crate::api::set_track_io_timing(path.as_str(), enabled).await {
+            // Postgres refusing is an answer worth showing verbatim, not a failure.
+            Ok(result) if result.ok => None,
+            Ok(result) => Some(
+                result
+                    .error
+                    .unwrap_or_else(|| "Postgres refused, without saying why.".to_string()),
+            ),
+            Err(err) => Some(err.to_string()),
+        };
+
+        {
+            let mut write = cs.write();
+            write.io_timing_busy = None;
+            write.io_timing_error = outcome;
+        }
+
+        // The badge, the tiles and the banner all read the collected capabilities, so
+        // the page only tells the truth again once the server has been re-read.
+        poll_once(cs).await;
+    });
+}
+
 #[component]
-fn DiskIoCard(io: DiskIo, track_io_timing: Option<bool>) -> Element {
+fn DiskIoCard(
+    cs: Signal<StatsState>,
+    path: String,
+    io: DiskIo,
+    track_io_timing: Option<bool>,
+) -> Element {
+    let busy = cs.read().io_timing_busy.as_deref() == Some(path.as_str());
+    let failure = cs.read().io_timing_error.clone();
     if !section::is_ready(&io.state) {
         return rsx! {
             div { class: "card",
@@ -806,6 +870,43 @@ fn DiskIoCard(io: DiskIo, track_io_timing: Option<bool>) -> Element {
                             " if it says anything else. Figures appear one tick after enabling, "
                             "since these are differences between samples."
                         }
+
+                        div { class: "banner__actions",
+                            button {
+                                class: "btn btn--primary btn--sm",
+                                disabled: busy,
+                                onclick: {
+                                    let path = path.clone();
+                                    move |_| toggle_track_io_timing(cs, path.clone(), true)
+                                },
+                                if busy { "Working…" } else { "Enable it" }
+                            }
+                            span { class: "faint", style: "font-size: 11.5px;",
+                                "Asks for confirmation first — this reaches the whole server."
+                            }
+                        }
+
+                        if let Some(failure) = failure.clone() {
+                            p { class: "banner__failure mono", "{failure}" }
+                        }
+                    }
+                }
+            }
+
+            if track_io_timing == Some(true) {
+                div { class: "card__body", style: "padding-bottom: 0; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;",
+                    StatePill { label: "track_io_timing on".to_string(), tone: StateTone::Ok }
+                    button {
+                        class: "btn btn--ghost btn--sm",
+                        disabled: busy,
+                        onclick: {
+                            let path = path.clone();
+                            move |_| toggle_track_io_timing(cs, path.clone(), false)
+                        },
+                        if busy { "Working…" } else { "Disable" }
+                    }
+                    if let Some(failure) = failure.clone() {
+                        span { class: "mono", style: "color: var(--danger); font-size: 11.5px;", "{failure}" }
                     }
                 }
             }
@@ -989,7 +1090,7 @@ fn LongestQueriesCard(activity: Activity) -> Element {
 }
 
 #[component]
-fn DatabaseSection(db: DatabaseStats) -> Element {
+fn DatabaseSection(cs: Signal<StatsState>, db: DatabaseStats) -> Element {
     let stats = db.stats;
 
     rsx! {
@@ -1026,6 +1127,8 @@ fn DatabaseSection(db: DatabaseStats) -> Element {
 
             LoadCard { load: stats.load.clone() }
             DiskIoCard {
+                cs,
+                path: db.path.clone(),
                 io: stats.disk_io.clone(),
                 track_io_timing: stats.server.track_io_timing,
             }
@@ -1179,7 +1282,7 @@ pub fn Stats() -> Element {
         .iter()
         .map(|db| {
             rsx! {
-                DatabaseSection { key: "{db.path}", db: db.clone() }
+                DatabaseSection { key: "{db.path}", cs, db: db.clone() }
             }
         })
         .collect();

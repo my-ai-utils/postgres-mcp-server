@@ -105,6 +105,42 @@ impl PostgresAccess {
         }
     }
 
+    /// Runs a fixed statement that returns no rows, on the operator's behalf.
+    ///
+    /// Separate from both other paths on purpose:
+    ///
+    /// - not [`Self::do_request`], because there is no agent here and no write window
+    ///   to consult — the operator clicked a button, which *is* the authorisation
+    ///   this server has;
+    /// - not [`Self::query_typed`], because that one is for reads that produce rows.
+    ///
+    /// `sql` is `&'static str` and that is the safety property: every caller is a
+    /// statement written out in full in this repository, so there is no input to
+    /// escape and no way for a request body to reach the parser. Anything that needs
+    /// a value from the client does not belong on this path.
+    pub async fn execute_statement(
+        &self,
+        sql: &'static str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let sql_data = SqlData {
+            sql: sql.to_string(),
+            values: SqlValues::Empty,
+        };
+
+        // Bounded the same way as the statistics queries: the driver retries beneath
+        // its own timeout, so without an outer deadline an unreachable database would
+        // leave the operator's click hanging for a minute and a half.
+        match tokio::time::timeout(timeout * 2, self.postgres.execute_sql(sql_data)).await {
+            Ok(result) => result.map(|_| ()).map_err(|err| format!("{:?}", err)),
+            Err(_) => Err(format!(
+                "The statement did not return within {}s — the database is most likely \
+                 unreachable.",
+                (timeout * 2).as_secs()
+            )),
+        }
+    }
+
     pub async fn do_request(&self, sql: String) -> Result<SqlResponseResult, String> {
         let sql_data = SqlData {
             sql: sql.to_string(),

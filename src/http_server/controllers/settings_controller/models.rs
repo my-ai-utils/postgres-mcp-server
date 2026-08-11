@@ -73,3 +73,37 @@ pub struct McpWritesInput {
     )]
     pub body: RawDataTyped<McpWritesBody>,
 }
+
+/// Body of `POST /api/Settings/TrackIoTiming`. The path picks the database whose
+/// connection runs the statement; the setting itself belongs to the server behind it.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, MyHttpObjectStructure)]
+pub struct TrackIoTimingBody {
+    #[serde(rename = "path")]
+    pub path: String,
+    #[serde(rename = "enabled")]
+    pub enabled: bool,
+}
+
+#[derive(MyHttpInput)]
+pub struct TrackIoTimingInput {
+    #[http_body_raw(
+        description = "JSON body { path, enabled }. path is the MCP mount path of a database on the server to change, e.g. \"/mcp\". Nothing from this body reaches the SQL parser: `enabled` selects between two statements written out in the server's source."
+    )]
+    pub body: RawDataTyped<TrackIoTimingBody>,
+}
+
+/// What the server reports after the attempt.
+///
+/// `enabled` is read back from the live session rather than echoed from the request:
+/// `ALTER SYSTEM` only edits a file, so "the statements did not error" is not the
+/// same as "the setting is on".
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+pub struct TrackIoTimingResultModel {
+    // False when Postgres refused — see `error`. The request itself was still valid.
+    pub ok: bool,
+    // What the server says track_io_timing is now. Null when the attempt failed.
+    pub enabled: Option<bool>,
+    // The driver's own message, verbatim: "must be superuser" and "cannot run inside
+    // a transaction block" call for different fixes.
+    pub error: Option<String>,
+}
