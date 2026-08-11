@@ -782,11 +782,30 @@ fn DiskIoCard(io: DiskIo, track_io_timing: Option<bool>) -> Element {
             if track_io_timing == Some(false) {
                 div { class: "card__body", style: "padding-bottom: 0;",
                     div { class: "banner banner--warn",
-                        code { class: "mono", "track_io_timing" }
-                        " is off, so the I/O wait tiles above read "
-                        b { "—" }
-                        " rather than a number. The block counts below still work — they say "
-                        "how much was read, just not how long it took. Turn it on to measure the time."
+                        p { style: "margin: 0 0 6px;",
+                            code { class: "mono", "track_io_timing" }
+                            " is off, so the I/O wait tiles above read "
+                            b { "—" }
+                            " rather than a number. The block counts below still work — they say "
+                            "how much was read, just not how long it took."
+                        }
+                        p { style: "margin: 0 0 6px;",
+                            "Turn it on as superuser — it is a reload parameter, no restart:"
+                        }
+                        pre { class: "banner__code mono",
+                            "ALTER SYSTEM SET track_io_timing = on;\nSELECT pg_reload_conf();"
+                        }
+                        p { style: "margin: 6px 0 0;",
+                            "On RDS and Cloud SQL set it in the parameter group instead. "
+                            "The cost of timing depends on the machine's clock source: on Linux, "
+                            code { class: "mono", "tsc" }
+                            " is cheap — check "
+                            code { class: "mono", "/sys/devices/system/clocksource/clocksource0/current_clocksource" }
+                            ", and measure with "
+                            code { class: "mono", "pg_test_timing" }
+                            " if it says anything else. Figures appear one tick after enabling, "
+                            "since these are differences between samples."
+                        }
                     }
                 }
             }

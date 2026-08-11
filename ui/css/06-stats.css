@@ -457,6 +457,21 @@
     color: var(--text);
 }
 
+/* A copy-pasteable command inside a banner. Scrolls rather than wrapping: a broken
+   SQL statement is worse than a horizontal scrollbar. */
+.banner__code {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: var(--r-sm);
+    background: var(--bg-sunken);
+    border: 1px solid var(--border);
+    font-size: 11.5px;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--text);
+}
+
 .banner--bad {
     background: var(--danger-soft);
     border-color: var(--danger);
