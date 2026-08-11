@@ -14,11 +14,12 @@ const SECTION_TABLES: &str = "tables";
 const SECTION_LOAD: &str = "load";
 const SECTION_ACTIVITY: &str = "activity";
 const SECTION_HEALTH: &str = "health";
+const SECTION_IO: &str = "io";
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct DbStatsToolCallRequest {
     #[property(
-        description: "Which section to return. One of: 'tables' (largest tables with their size, row estimates, scan counts and last vacuum), 'load' (the statements consuming the most execution time), 'activity' (connections and the longest-running queries), 'health' (database-wide counters and throughput), or 'all'. Defaults to 'all'."
+        description: "Which section to return. One of: 'tables' (largest tables with their size, row estimates, scan counts and last vacuum), 'load' (the statements consuming the most execution time), 'activity' (connections and the longest-running queries), 'health' (database-wide counters and throughput), 'io' (which tables are read off disk, plus WAL and checkpoint write volume), or 'all'. Defaults to 'all'."
     )]
     pub section: String,
 }
@@ -52,7 +53,7 @@ impl DbStatsMcpService {
 
 impl ToolDefinition for DbStatsMcpService {
     const FUNC_NAME: &'static str = "db_stats";
-    const DESCRIPTION: &'static str = "Read collected statistics for the database described in the server instructions: table sizes and row estimates, the statements consuming the most execution time, connection counts and long-running queries, and database-wide throughput counters. Useful before writing a query against an unfamiliar schema — it says which tables are large, which have no index usage, and which are bloated. Served from a cache refreshed in the background, so it costs the database nothing: activity is a few seconds old, sizes and statement timings up to a minute. Every section reports its own availability; 'unavailable' with a reason means this server or this account cannot produce it (for example pg_stat_statements not being installed). Note that Postgres exposes no host CPU metric at all — 'busyBackends' and 'execMsPerSec' are execution-time proxies, not CPU percentages.";
+    const DESCRIPTION: &'static str = "Read collected statistics for the database described in the server instructions: table sizes and row estimates, the statements consuming the most execution time, connection counts and long-running queries, database-wide throughput counters, and disk I/O (which tables are being read off disk, plus WAL and checkpoint write volume). Useful before writing a query against an unfamiliar schema — it says which tables are large, which have no index usage, and which are bloated. Served from a cache refreshed in the background, so it costs the database nothing: activity is a few seconds old, sizes and statement timings up to a minute. Every section reports its own availability; 'unavailable' with a reason means this server or this account cannot produce it (for example pg_stat_statements not being installed). Note that Postgres exposes no host CPU metric at all — 'busyBackends' and 'execMsPerSec' are execution-time proxies, not CPU percentages.";
 }
 
 #[async_trait::async_trait]
@@ -87,6 +88,7 @@ fn narrow_to_section(json: serde_json::Value, section: &str) -> serde_json::Valu
         SECTION_LOAD => "load",
         SECTION_ACTIVITY => "activity",
         SECTION_HEALTH => "health",
+        SECTION_IO => "diskIo",
         _ => return json,
     };
 
@@ -118,6 +120,7 @@ mod tests {
             "health": { "state": "ready" },
             "load": { "state": "ready" },
             "tables": { "state": "ready" },
+            "diskIo": { "state": "ready" },
         })
     }
 
@@ -165,6 +168,7 @@ mod tests {
             (SECTION_LOAD, "load"),
             (SECTION_ACTIVITY, "activity"),
             (SECTION_HEALTH, "health"),
+            (SECTION_IO, "diskIo"),
         ] {
             let narrowed = narrow_to_section(sample_json(), section);
             let narrowed = narrowed.as_object().unwrap();

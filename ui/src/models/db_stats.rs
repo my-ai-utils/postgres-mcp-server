@@ -196,6 +196,9 @@ pub struct ServerInfo {
     pub can_read_all_stats: Option<bool>,
     pub has_pg_stat_statements: Option<bool>,
     pub max_connections: Option<i64>,
+    /// Off by default. Without it every I/O *timing* figure is `None` rather than
+    /// zero, because Postgres reports a hard zero when nothing is being measured.
+    pub track_io_timing: Option<bool>,
 }
 
 impl ServerInfo {
@@ -301,6 +304,9 @@ pub struct HealthRates {
     pub blks_read_per_sec: Option<f64>,
     pub cache_hit_ratio: Option<f64>,
     pub busy_backends: Option<f64>,
+    pub io_read_ms_per_sec: Option<f64>,
+    pub io_write_ms_per_sec: Option<f64>,
+    pub io_share_of_active: Option<f64>,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Default)]
@@ -322,6 +328,8 @@ pub struct Health {
     pub stats_reset: Option<String>,
     pub active_time_ms: Option<f64>,
     pub session_time_ms: Option<f64>,
+    pub blk_read_time_ms: Option<f64>,
+    pub blk_write_time_ms: Option<f64>,
     pub rates: Option<HealthRates>,
 }
 
@@ -354,6 +362,92 @@ impl Health {
     pub fn rollbacks_per_sec(&self) -> Option<f64> {
         self.rates.as_ref()?.rollbacks_per_sec
     }
+
+    /// Milliseconds per second lost to reads and writes together — the headline
+    /// damage figure. `None` when `track_io_timing` is off, which the tile renders
+    /// as `—` rather than as a reassuring zero.
+    pub fn io_wait_ms_per_sec(&self) -> Option<f64> {
+        let rates = self.rates.as_ref()?;
+
+        match (rates.io_read_ms_per_sec, rates.io_write_ms_per_sec) {
+            (Some(read), Some(write)) => Some(read + write),
+            (Some(read), None) => Some(read),
+            (None, Some(write)) => Some(write),
+            (None, None) => None,
+        }
+    }
+
+    pub fn io_share_of_active(&self) -> Option<f64> {
+        self.rates.as_ref()?.io_share_of_active
+    }
+}
+
+/// One table's read cost, from `pg_statio_user_tables`.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableIo {
+    pub schema: Option<String>,
+    pub name: Option<String>,
+    pub total_read_blocks: Option<i64>,
+    pub heap_read_blocks: Option<i64>,
+    pub index_read_blocks: Option<i64>,
+    pub toast_read_blocks: Option<i64>,
+    pub cache_hit_ratio: Option<f64>,
+    pub delta_read_blocks: Option<i64>,
+    pub delta_read_bytes: Option<i64>,
+    pub read_bytes_per_sec: Option<f64>,
+}
+
+impl TableIo {
+    pub fn full_name(&self) -> String {
+        format!(
+            "{}.{}",
+            self.schema.as_deref().unwrap_or("?"),
+            self.name.as_deref().unwrap_or("?")
+        )
+    }
+}
+
+/// Cluster-wide write accounting.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteIo {
+    pub wal_bytes: Option<i64>,
+    pub wal_records: Option<i64>,
+    pub wal_full_page_images: Option<i64>,
+    pub wal_bytes_per_sec: Option<f64>,
+    pub checkpoints_timed: Option<i64>,
+    pub checkpoints_requested: Option<i64>,
+    pub buffers_written_by_checkpointer: Option<i64>,
+    pub buffers_written_by_bgwriter: Option<i64>,
+    pub buffers_written_by_backends: Option<i64>,
+}
+
+impl WriteIo {
+    /// Share of checkpoints forced early by `max_wal_size` rather than run on the
+    /// timer. Above roughly a third is the classic sign the setting is too small.
+    pub fn forced_checkpoint_ratio(&self) -> Option<f64> {
+        let timed = self.checkpoints_timed? as f64;
+        let requested = self.checkpoints_requested? as f64;
+
+        if timed + requested <= 0.0 {
+            return None;
+        }
+
+        Some(requested / (timed + requested))
+    }
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskIo {
+    pub state: String,
+    pub reason: Option<String>,
+    pub io_timing_enabled: Option<bool>,
+    pub tables: Vec<TableIo>,
+    pub writes: Option<WriteIo>,
+    /// Why the write half is missing, when it is — the read half can still work.
+    pub writes_unavailable: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq)]
@@ -476,6 +570,7 @@ pub struct DbStats {
     pub health: Health,
     pub load: Load,
     pub tables: Tables,
+    pub disk_io: DiskIo,
 }
 
 /// Which Postgres server a database lives on, derived by the server from the

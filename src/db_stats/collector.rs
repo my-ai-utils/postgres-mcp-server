@@ -294,6 +294,7 @@ async fn collect_slow(db: Arc<DbContext>) {
                 server: Section::Unavailable(err),
                 tables: Section::Unavailable(UNREACHABLE.to_string()),
                 statements: Section::Unavailable(UNREACHABLE.to_string()),
+                disk_io: Section::Unavailable(UNREACHABLE.to_string()),
             });
             return;
         }
@@ -311,10 +312,19 @@ async fn collect_slow(db: Arc<DbContext>) {
     )
     .await;
 
+    let disk_io = super::collect_disk_io(
+        &db.postgres,
+        &capabilities,
+        db.stats.previous_disk_io().as_ref(),
+        QUERY_TIMEOUT,
+    )
+    .await;
+
     db.stats.apply_slow_tick(SlowTick {
         server: Section::Ready(capabilities),
         tables: Section::from_result(tables),
         statements: Section::from_result(statements),
+        disk_io: Section::from_result(disk_io),
     });
 }
 

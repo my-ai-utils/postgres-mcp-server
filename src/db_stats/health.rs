@@ -35,6 +35,14 @@ pub struct DbHealthSample {
     pub deadlocks: Option<i64>,
     pub temp_files: Option<i64>,
     pub temp_bytes: Option<i64>,
+    /// Milliseconds backends spent **waiting on reads** since the reset.
+    ///
+    /// `None` unless `track_io_timing` is on — and that `None` is load-bearing: with
+    /// the setting off Postgres reports a hard zero, which would read as "this
+    /// database never touches the disk".
+    pub blk_read_time_ms: Option<f64>,
+    /// Milliseconds spent waiting on writes. Same caveat.
+    pub blk_write_time_ms: Option<f64>,
     /// Milliseconds backends spent *executing* since the reset (14+).
     pub active_time_ms: Option<f64>,
     /// Milliseconds of session lifetime since the reset (14+).
@@ -59,6 +67,8 @@ impl DbHealthSample {
             deadlocks: opt_i64(row, "deadlocks"),
             temp_files: opt_i64(row, "temp_files"),
             temp_bytes: opt_i64(row, "temp_bytes"),
+            blk_read_time_ms: opt_f64(row, "blk_read_time_ms"),
+            blk_write_time_ms: opt_f64(row, "blk_write_time_ms"),
             active_time_ms: opt_f64(row, "active_time_ms"),
             session_time_ms: opt_f64(row, "session_time_ms"),
             stats_reset: opt_timestamp(row, "stats_reset"),
@@ -83,6 +93,20 @@ pub struct DbHealthRates {
     /// is nearly always a flattering 0.99 because it is dominated by whatever the
     /// database did on the day it was last reset.
     pub cache_hit_ratio: Option<f64>,
+    /// Milliseconds of **read wait per wall-clock second** during the window.
+    ///
+    /// This is the damage figure: 1000 means the database spent a full second of
+    /// every second blocked on reads — one backend's worth of pure waiting. `None`
+    /// when `track_io_timing` is off, because then nothing was measured.
+    pub io_read_ms_per_sec: Option<f64>,
+    /// The same for writes.
+    pub io_write_ms_per_sec: Option<f64>,
+    /// Read + write wait as a share of execution time.
+    ///
+    /// The number that says *why* the database is busy: 0.8 means four fifths of the
+    /// time backends were "executing", they were actually waiting on the disk. `None`
+    /// unless both the timing and the execution counters exist.
+    pub io_share_of_active: Option<f64>,
     /// Average number of backends executing at any instant during the window
     /// (Δ`active_time` / Δwall-clock).
     ///
@@ -112,6 +136,9 @@ pub struct DbHealth {
     /// Since the last stats reset.
     pub lifetime_cache_hit_ratio: Option<f64>,
     pub stats_reset: Option<String>,
+    /// Lifetime I/O wait, `None` unless `track_io_timing` is on.
+    pub blk_read_time_ms: Option<f64>,
+    pub blk_write_time_ms: Option<f64>,
     /// `None` while the server predates 14.
     pub active_time_ms: Option<f64>,
     pub session_time_ms: Option<f64>,
@@ -175,6 +202,8 @@ impl DbHealth {
             rows_written: current.rows_written,
             lifetime_cache_hit_ratio: hit_ratio(current.blks_hit, current.blks_read),
             stats_reset: current.stats_reset.clone(),
+            blk_read_time_ms: current.blk_read_time_ms,
+            blk_write_time_ms: current.blk_write_time_ms,
             active_time_ms: current.active_time_ms,
             session_time_ms: current.session_time_ms,
             rates: previous.and_then(|previous| rates(current, previous)),
@@ -209,6 +238,10 @@ fn rates(current: &DbHealthSample, previous: &DbHealthSample) -> Option<DbHealth
     let blks_hit = delta_i64(current.blks_hit, previous.blks_hit);
     let blks_read = delta_i64(current.blks_read, previous.blks_read);
 
+    let io_read = delta_f64(current.blk_read_time_ms, previous.blk_read_time_ms);
+    let io_write = delta_f64(current.blk_write_time_ms, previous.blk_write_time_ms);
+    let active = delta_f64(current.active_time_ms, previous.active_time_ms);
+
     Some(DbHealthRates {
         window_secs,
         commits_per_sec: per_sec(delta_i64(current.commits, previous.commits), window_secs),
@@ -219,8 +252,21 @@ fn rates(current: &DbHealthSample, previous: &DbHealthSample) -> Option<DbHealth
         ),
         blks_read_per_sec: per_sec(blks_read, window_secs),
         cache_hit_ratio: hit_ratio(blks_hit, blks_read),
-        busy_backends: delta_f64(current.active_time_ms, previous.active_time_ms)
-            .map(|delta_ms| delta_ms / (window_secs * 1000.0)),
+        io_read_ms_per_sec: io_read.map(|ms| ms / window_secs),
+        io_write_ms_per_sec: io_write.map(|ms| ms / window_secs),
+        // Guarded against a zero denominator: an idle window has no execution time
+        // to take a share of, and 0/0 would render as NaN in the UI.
+        io_share_of_active: io_read
+            .zip(io_write)
+            .zip(active)
+            .and_then(|((read, write), active)| {
+                if active <= 0.0 {
+                    return None;
+                }
+
+                Some((read + write) / active)
+            }),
+        busy_backends: active.map(|delta_ms| delta_ms / (window_secs * 1000.0)),
     })
 }
 
@@ -229,6 +275,15 @@ fn rates(current: &DbHealthSample, previous: &DbHealthSample) -> Option<DbHealth
 fn build_sql(capabilities: &ServerCapabilities) -> String {
     let (active_time, session_time) = if capabilities.server_version_num >= PG14 {
         ("d.active_time", "d.session_time")
+    } else {
+        ("NULL::float8", "NULL::float8")
+    };
+
+    // With `track_io_timing` off these columns are a hard zero rather than absent.
+    // Selecting NULL instead is the whole point: "nobody measured" and "no I/O
+    // happened" are different answers, and only one of them is true here.
+    let (blk_read_time, blk_write_time) = if capabilities.track_io_timing {
+        ("d.blk_read_time", "d.blk_write_time")
     } else {
         ("NULL::float8", "NULL::float8")
     };
@@ -248,13 +303,15 @@ SELECT
     d.deadlocks                                                           AS deadlocks,
     d.temp_files                                                          AS temp_files,
     d.temp_bytes                                                          AS temp_bytes,
+    {}                                                                    AS blk_read_time_ms,
+    {}                                                                    AS blk_write_time_ms,
     {}                                                                    AS active_time_ms,
     {}                                                                    AS session_time_ms,
     d.stats_reset                                                         AS stats_reset
 FROM pg_stat_database d
 WHERE d.datname = current_database()
 "#,
-        active_time, session_time
+        blk_read_time, blk_write_time, active_time, session_time
     )
 }
 
@@ -295,6 +352,8 @@ mod tests {
             deadlocks: Some(0),
             temp_files: Some(0),
             temp_bytes: Some(0),
+            blk_read_time_ms: None,
+            blk_write_time_ms: None,
             active_time_ms: Some(active_time_ms),
             session_time_ms: Some(0.0),
             stats_reset: Some("2026-01-01T00:00:00+00:00".to_string()),
@@ -353,6 +412,59 @@ mod tests {
         let current = sample(100, 40, 5_000.0);
 
         assert!(DbHealth::new(&current, Some(&previous)).rates.is_none());
+    }
+
+    #[test]
+    fn io_wait_is_reported_as_time_lost_per_second_and_as_a_share_of_execution() {
+        let mut previous = sample(100, 10, 0.0);
+        let mut current = sample(110, 40, 8_000.0);
+
+        previous.blk_read_time_ms = Some(1_000.0);
+        previous.blk_write_time_ms = Some(500.0);
+        // Over the 10s window: 2s waiting on reads, 0.5s on writes, 8s executing.
+        current.blk_read_time_ms = Some(3_000.0);
+        current.blk_write_time_ms = Some(1_000.0);
+
+        let rates = DbHealth::new(&current, Some(&previous)).rates.unwrap();
+
+        assert_eq!(rates.io_read_ms_per_sec, Some(200.0));
+        assert_eq!(rates.io_write_ms_per_sec, Some(50.0));
+        // 2.5s of the 8s spent "executing" was really waiting on the disk.
+        assert_eq!(rates.io_share_of_active, Some(0.3125));
+    }
+
+    #[test]
+    fn io_timing_switched_off_reports_nothing_rather_than_zero() {
+        // With track_io_timing off Postgres returns a hard zero; the collector selects
+        // NULL instead, and a null must not become "this database never waits".
+        let previous = sample(100, 10, 0.0);
+        let current = sample(110, 40, 5_000.0);
+
+        let rates = DbHealth::new(&current, Some(&previous)).rates.unwrap();
+
+        assert_eq!(rates.io_read_ms_per_sec, None);
+        assert_eq!(rates.io_share_of_active, None);
+        // The rest of the window is unaffected.
+        assert_eq!(rates.busy_backends, Some(0.5));
+    }
+
+    #[test]
+    fn an_idle_window_has_no_execution_time_to_take_an_io_share_of() {
+        let mut previous = sample(100, 10, 5_000.0);
+        let mut current = sample(110, 10, 5_000.0);
+        previous.blk_read_time_ms = Some(0.0);
+        previous.blk_write_time_ms = Some(0.0);
+        current.blk_read_time_ms = Some(0.0);
+        current.blk_write_time_ms = Some(0.0);
+
+        // 0/0 would render as NaN.
+        assert_eq!(
+            DbHealth::new(&current, Some(&previous))
+                .rates
+                .unwrap()
+                .io_share_of_active,
+            None
+        );
     }
 
     #[test]

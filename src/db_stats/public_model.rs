@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 use super::{
-    ActivityStats, DbHealth, DbHealthRates, DbStatsSnapshot, LongRunningQuery, Section,
+    ActivityStats, DbHealth, DbHealthRates, DbStatsSnapshot, DiskIo, LongRunningQuery, Section,
     ServerCapabilities, TableStats, TablesStats, TopStatement, TopStatements,
 };
 
@@ -55,6 +55,9 @@ pub struct ServerInfoModel {
     pub can_read_all_stats: Option<bool>,
     pub has_pg_stat_statements: Option<bool>,
     pub max_connections: Option<i64>,
+    // Whether the server times its I/O. Off by default; without it every I/O timing
+    // figure is null rather than zero.
+    pub track_io_timing: Option<bool>,
 }
 
 impl ServerInfoModel {
@@ -71,6 +74,7 @@ impl ServerInfoModel {
             can_read_all_stats: data.map(|d| d.sees_all_stats()),
             has_pg_stat_statements: data.map(|d| d.has_pg_stat_statements),
             max_connections: data.map(|d| d.max_connections as i64),
+            track_io_timing: data.map(|d| d.track_io_timing),
         }
     }
 }
@@ -162,6 +166,14 @@ pub struct HealthRatesModel {
     // lock waits as busy, and sees nothing outside this database. null on servers
     // older than 14, which have no active_time column.
     pub busy_backends: Option<f64>,
+    // Milliseconds per wall-clock second the database spent blocked on reads /
+    // writes. 1000 means a full second of every second was pure waiting. null when
+    // track_io_timing is off.
+    pub io_read_ms_per_sec: Option<f64>,
+    pub io_write_ms_per_sec: Option<f64>,
+    // I/O wait as a share of execution time: 0.8 means four fifths of the time
+    // backends were "executing", they were waiting on the disk.
+    pub io_share_of_active: Option<f64>,
 }
 
 impl HealthRatesModel {
@@ -174,6 +186,9 @@ impl HealthRatesModel {
             blks_read_per_sec: src.blks_read_per_sec,
             cache_hit_ratio: src.cache_hit_ratio,
             busy_backends: src.busy_backends,
+            io_read_ms_per_sec: src.io_read_ms_per_sec,
+            io_write_ms_per_sec: src.io_write_ms_per_sec,
+            io_share_of_active: src.io_share_of_active,
         }
     }
 }
@@ -197,6 +212,11 @@ pub struct HealthModel {
     pub stats_reset: Option<String>,
     pub active_time_ms: Option<f64>,
     pub session_time_ms: Option<f64>,
+    // Lifetime milliseconds waited on reads/writes. null unless track_io_timing is
+    // on — Postgres reports a hard zero when it is off, which would read as "this
+    // database never touches the disk".
+    pub blk_read_time_ms: Option<f64>,
+    pub blk_write_time_ms: Option<f64>,
     // null on the first tick after start-up, and again after a pg_stat_reset().
     pub rates: Option<HealthRatesModel>,
 }
@@ -222,6 +242,8 @@ impl HealthModel {
             stats_reset: data.and_then(|d| d.stats_reset.clone()),
             active_time_ms: data.and_then(|d| d.active_time_ms),
             session_time_ms: data.and_then(|d| d.session_time_ms),
+            blk_read_time_ms: data.and_then(|d| d.blk_read_time_ms),
+            blk_write_time_ms: data.and_then(|d| d.blk_write_time_ms),
             rates: data
                 .and_then(|d| d.rates.as_ref())
                 .map(HealthRatesModel::new),
@@ -359,6 +381,105 @@ impl TablesModel {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
+pub struct TableIoModel {
+    pub schema: Option<String>,
+    pub name: Option<String>,
+    // Heap + index + TOAST blocks not served from shared buffers, since the reset.
+    pub total_read_blocks: Option<i64>,
+    pub heap_read_blocks: Option<i64>,
+    pub index_read_blocks: Option<i64>,
+    pub toast_read_blocks: Option<i64>,
+    // Share of this table's block accesses shared buffers satisfied — what separates
+    // "big table, fully cached" from "big table, read off disk".
+    pub cache_hit_ratio: Option<f64>,
+    pub delta_read_blocks: Option<i64>,
+    pub delta_read_bytes: Option<i64>,
+    pub read_bytes_per_sec: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteIoModel {
+    // Cluster-wide, unlike the per-table reads above.
+    pub wal_bytes: Option<i64>,
+    pub wal_records: Option<i64>,
+    // Whole 8 kB pages copied into WAL on the first write to them after a
+    // checkpoint. A large share of WAL means checkpoints are too frequent for the
+    // write rate.
+    pub wal_full_page_images: Option<i64>,
+    pub wal_bytes_per_sec: Option<f64>,
+    pub checkpoints_timed: Option<i64>,
+    // Checkpoints forced early by max_wal_size. Many of these relative to timed ones
+    // means max_wal_size is too small, and each one restarts the full-page-image cost.
+    pub checkpoints_requested: Option<i64>,
+    pub buffers_written_by_checkpointer: Option<i64>,
+    pub buffers_written_by_bgwriter: Option<i64>,
+    // Buffers a query backend had to write itself because no clean buffer was free —
+    // a query stalling to do the writer's job. null on Postgres 17+, where the
+    // counter moved to pg_stat_io.
+    pub buffers_written_by_backends: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskIoModel {
+    pub state: String,
+    pub reason: Option<String>,
+    // False when track_io_timing is off. Every *timing* figure is then null rather
+    // than zero, because Postgres reports a hard zero for "nobody measured".
+    pub io_timing_enabled: Option<bool>,
+    // Tables ranked by blocks read since the previous tick, falling back to lifetime.
+    pub tables: Vec<TableIoModel>,
+    pub writes: Option<WriteIoModel>,
+    // Why the write half is missing, when it is.
+    pub writes_unavailable: Option<String>,
+}
+
+impl DiskIoModel {
+    fn new(section: &Section<DiskIo>) -> Self {
+        let data = section.data();
+
+        Self {
+            state: section.state_str().to_string(),
+            reason: section.reason(),
+            io_timing_enabled: data.map(|d| d.io_timing_enabled),
+            tables: data
+                .map(|d| {
+                    d.tables
+                        .iter()
+                        .map(|src| TableIoModel {
+                            schema: src.schema_name.clone(),
+                            name: src.table_name.clone(),
+                            total_read_blocks: src.total_read_blocks,
+                            heap_read_blocks: src.heap_read_blocks,
+                            index_read_blocks: src.index_read_blocks,
+                            toast_read_blocks: src.toast_read_blocks,
+                            cache_hit_ratio: src.cache_hit_ratio,
+                            delta_read_blocks: src.delta_read_blocks,
+                            delta_read_bytes: src.delta_read_bytes,
+                            read_bytes_per_sec: src.read_bytes_per_sec,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            writes: data.and_then(|d| d.writes.as_ref()).map(|src| WriteIoModel {
+                wal_bytes: src.wal_bytes,
+                wal_records: src.wal_records,
+                wal_full_page_images: src.wal_full_page_images,
+                wal_bytes_per_sec: src.wal_bytes_per_sec,
+                checkpoints_timed: src.checkpoints_timed,
+                checkpoints_requested: src.checkpoints_requested,
+                buffers_written_by_checkpointer: src.buffers_written_by_checkpointer,
+                buffers_written_by_bgwriter: src.buffers_written_by_bgwriter,
+                buffers_written_by_backends: src.buffers_written_by_backends,
+            }),
+            writes_unavailable: data.and_then(|d| d.writes_unavailable.clone()),
+        }
+    }
+}
+
 /// One database's statistics, with no mention of which mount it came from.
 ///
 /// That omission is the reason this type exists separately from
@@ -380,6 +501,7 @@ pub struct DbStatsModel {
     pub health: HealthModel,
     pub load: LoadModel,
     pub tables: TablesModel,
+    pub disk_io: DiskIoModel,
 }
 
 impl DbStatsModel {
@@ -393,6 +515,7 @@ impl DbStatsModel {
             health: HealthModel::new(&src.health),
             load: LoadModel::new(&src.statements),
             tables: TablesModel::new(&src.tables),
+            disk_io: DiskIoModel::new(&src.disk_io),
         }
     }
 }

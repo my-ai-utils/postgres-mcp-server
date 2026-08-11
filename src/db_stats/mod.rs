@@ -49,6 +49,9 @@ pub use capabilities::*;
 
 pub mod collector;
 
+mod disk_io;
+pub use disk_io::*;
+
 mod health;
 pub use health::*;
 

@@ -845,6 +845,42 @@ textarea {
     font-size: 10.5px;
     color: var(--text-faint);
     font-variant-numeric: tabular-nums;
+    /* The row swaps three labels for one while hovering; a fixed height keeps the
+       panels from shifting under the pointer as it does. */
+    min-height: 15px;
+}
+
+/* The moment being read. Louder than the fixed labels because it is the answer to
+   what the pointer is asking. */
+.chart__x-axis-hover {
+    color: var(--text);
+    font-weight: 600;
+}
+
+/* --- Hover layer --- */
+.chart__svg {
+    cursor: crosshair;
+}
+
+.chart__crosshair {
+    stroke: var(--text-faint);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+}
+
+.chart__cursor-dot {
+    fill: var(--chart-line);
+    stroke: var(--bg-elev);
+    stroke-width: 2;
+    /* The mark keeps its size no matter how far the box is stretched. */
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+}
+
+/* Values lead, labels follow: under the pointer the number is the strong element. */
+.panel__stats-hover {
+    color: var(--chart-line);
 }
 
 .chart__footnote {
@@ -983,6 +1019,17 @@ textarea {
 
 .tile--neutral {
     border-left-color: var(--border-strong);
+}
+
+/* A heading inside a card body, for a group of tiles that answers a different
+   question than the rows above it. */
+.card__section-title {
+    margin: 0 0 8px;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-weight: 600;
+    color: var(--text-muted);
 }
 
 /* --- Banners: something the operator has to act on --- */

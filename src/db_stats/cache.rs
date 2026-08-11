@@ -4,8 +4,8 @@ use parking_lot::Mutex;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 use super::{
-    ActivityStats, DbHealth, DbHealthSample, DbStatsSnapshot, Section, ServerCapabilities,
-    StatementsSnapshot, TablesStats, TopStatements,
+    ActivityStats, DbHealth, DbHealthSample, DbStatsSnapshot, DiskIo, DiskIoSnapshot, Section,
+    ServerCapabilities, StatementsSnapshot, TablesStats, TopStatements,
 };
 
 /// What the last fast tick produced.
@@ -21,6 +21,7 @@ pub struct SlowTick {
     pub server: Section<ServerCapabilities>,
     pub tables: Section<TablesStats>,
     pub statements: Section<(TopStatements, StatementsSnapshot)>,
+    pub disk_io: Section<(DiskIo, DiskIoSnapshot)>,
 }
 
 /// One database's published statistics, plus the raw previous samples the rate
@@ -42,6 +43,7 @@ struct CacheState {
     snapshot: Arc<DbStatsSnapshot>,
     previous_health: Option<DbHealthSample>,
     previous_statements: Option<StatementsSnapshot>,
+    previous_disk_io: Option<DiskIoSnapshot>,
 }
 
 impl DbStatsCache {
@@ -51,6 +53,7 @@ impl DbStatsCache {
                 snapshot: Arc::new(DbStatsSnapshot::default()),
                 previous_health: None,
                 previous_statements: None,
+                previous_disk_io: None,
             }),
         }
     }
@@ -76,6 +79,11 @@ impl DbStatsCache {
     /// released before the collector goes near the network.
     pub fn previous_statements(&self) -> Option<StatementsSnapshot> {
         self.state.lock().previous_statements.clone()
+    }
+
+    /// Previous per-table read counters, for the next diff.
+    pub fn previous_disk_io(&self) -> Option<DiskIoSnapshot> {
+        self.state.lock().previous_disk_io.clone()
     }
 
     /// Capabilities on their own.
@@ -132,11 +140,21 @@ impl DbStatsCache {
             Section::Pending => Section::Pending,
         };
 
+        let disk_io = match tick.disk_io {
+            Section::Ready((disk_io, disk_io_snapshot)) => {
+                state.previous_disk_io = Some(disk_io_snapshot);
+                Section::Ready(disk_io)
+            }
+            Section::Unavailable(reason) => Section::Unavailable(reason),
+            Section::Pending => Section::Pending,
+        };
+
         let mut snapshot = (*state.snapshot).clone();
         snapshot.slow_collected_at = Some(DateTimeAsMicroseconds::now());
         snapshot.server = tick.server;
         snapshot.tables = tick.tables;
         snapshot.statements = statements;
+        snapshot.disk_io = disk_io;
 
         state.snapshot = Arc::new(snapshot);
     }

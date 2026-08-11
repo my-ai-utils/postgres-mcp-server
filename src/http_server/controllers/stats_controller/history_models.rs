@@ -84,6 +84,9 @@ pub struct LoadPointModel {
     pub rows_written_per_sec: Option<f64>,
     pub blks_read_per_sec: Option<f64>,
     pub cache_hit_ratio: Option<f64>,
+    // Milliseconds per second lost waiting on disk. null when track_io_timing is off.
+    pub io_read_ms_per_sec: Option<f64>,
+    pub io_write_ms_per_sec: Option<f64>,
     pub db_size_bytes: Option<i64>,
     pub backends_total: Option<i64>,
     pub backends_active: Option<i64>,
@@ -103,6 +106,8 @@ impl LoadPointModel {
             rows_written_per_sec: src.value.rows_written_per_sec,
             blks_read_per_sec: src.value.blks_read_per_sec,
             cache_hit_ratio: src.value.cache_hit_ratio,
+            io_read_ms_per_sec: src.value.io_read_ms_per_sec,
+            io_write_ms_per_sec: src.value.io_write_ms_per_sec,
             db_size_bytes: src.value.db_size_bytes,
             backends_total: src.value.backends_total,
             backends_active: src.value.backends_active,

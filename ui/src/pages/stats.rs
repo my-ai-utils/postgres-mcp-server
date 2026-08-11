@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 use crate::components::atoms::{StatePill, StateTone};
 use crate::components::{LoadChartPoint, LoadCharts, LoadSeries, Topbar};
 use crate::models::{
-    Activity, DatabaseStats, Health, HistoryInfo, Load, ServerInfo, ServerRef, ServerSettings,
-    ServerStats, Tables, fmt, section,
+    Activity, DatabaseStats, DiskIo, Health, HistoryInfo, Load, ServerInfo, ServerRef,
+    ServerSettings, ServerStats, Tables, WriteIo, fmt, section,
 };
 
 /// Slower than the requests page's 1s: nothing here moves faster than the
@@ -245,6 +245,29 @@ fn busy_tone(busy: Option<f64>) -> StateTone {
     }
 }
 
+/// Milliseconds of waiting per wall-clock second. 1000 is a whole backend doing
+/// nothing but waiting for the disk, so the bands sit well below it — by the time a
+/// database loses a full second per second, it has been in trouble for a while.
+fn io_wait_tone(ms_per_sec: Option<f64>) -> StateTone {
+    match ms_per_sec {
+        Some(ms) if ms >= 500.0 => StateTone::Bad,
+        Some(ms) if ms >= 100.0 => StateTone::Warn,
+        Some(_) => StateTone::Ok,
+        None => StateTone::Neutral,
+    }
+}
+
+/// What share of "executing" was really waiting. Half is the point where the
+/// database is more storage-bound than work-bound.
+fn io_share_tone(share: Option<f64>) -> StateTone {
+    match share {
+        Some(share) if share >= 0.5 => StateTone::Bad,
+        Some(share) if share >= 0.25 => StateTone::Warn,
+        Some(_) => StateTone::Ok,
+        None => StateTone::Neutral,
+    }
+}
+
 /// A cache that has to go to disk for more than a few percent of reads is worth
 /// noticing; the scale is inverted, hence its own function.
 fn cache_tone(ratio: Option<f64>) -> StateTone {
@@ -390,6 +413,29 @@ fn LoadTiles(health: Health, activity: Activity) -> Element {
                 tone: saturation_tone(activity.connections_ratio()),
                 title: Some(
                     "Client backends across the whole cluster against max_connections — that is the pair that runs out. 'here' counts only this database."
+                        .to_string(),
+                ),
+            }
+            StatTile {
+                label: "I/O wait".to_string(),
+                value: match health.io_wait_ms_per_sec() {
+                    Some(ms) => format!("{:.0}", ms),
+                    None => fmt::NONE.to_string(),
+                },
+                hint: "ms per second".to_string(),
+                tone: io_wait_tone(health.io_wait_ms_per_sec()),
+                title: Some(
+                    "Milliseconds of every wall-clock second this database spent blocked on disk reads and writes. 1000 means a full second of waiting per second — one backend doing nothing but waiting. Needs track_io_timing = on; with it off Postgres reports a hard zero, so this shows — instead."
+                        .to_string(),
+                ),
+            }
+            StatTile {
+                label: "Of that, I/O".to_string(),
+                value: fmt::ratio(health.io_share_of_active()),
+                hint: "of execution".to_string(),
+                tone: io_share_tone(health.io_share_of_active()),
+                title: Some(
+                    "How much of the time backends spent 'executing' was really spent waiting on the disk. High here means the busy-backends figure to the left is disk, not work."
                         .to_string(),
                 ),
             }
@@ -643,6 +689,209 @@ fn TablesCard(tables: Tables) -> Element {
     }
 }
 
+/// Where the disk time goes: which tables are read off disk, and how much is being
+/// written.
+///
+/// The read half is per database; the write half (WAL, checkpoints) is a property of
+/// the whole server, and is labelled as such so nobody reads it as this database's
+/// alone.
+#[component]
+fn DiskIoCard(io: DiskIo, track_io_timing: Option<bool>) -> Element {
+    if !section::is_ready(&io.state) {
+        return rsx! {
+            div { class: "card",
+                div { class: "card__header",
+                    span { class: "card__title", "Disk I/O" }
+                }
+                div { class: "card__body",
+                    SectionNotice { state: io.state.clone(), reason: io.reason.clone() }
+                }
+            }
+        };
+    }
+
+    let rows: Vec<Element> = io
+        .tables
+        .iter()
+        .map(|table| {
+            let cold = table.cache_hit_ratio.map(|ratio| ratio < 0.9).unwrap_or(false);
+
+            rsx! {
+                tr { key: "{table.full_name()}",
+                    td {
+                        span { class: "mono dt-ellipsis", style: "max-width: 260px;", title: "{table.full_name()}",
+                            "{table.full_name()}"
+                        }
+                    }
+                    td { class: "mono num", "{fmt::bytes(table.delta_read_bytes)}" }
+                    td { class: "mono num",
+                        match table.read_bytes_per_sec {
+                            Some(rate) => fmt::bytes(Some(rate as i64)),
+                            None => fmt::NONE.to_string(),
+                        }
+                    }
+                    td {
+                        class: if cold { "mono num state--bad-text" } else { "mono num" },
+                        title: "Share of this table's block accesses served from shared buffers",
+                        "{fmt::ratio(table.cache_hit_ratio)}"
+                    }
+                    td { class: "mono num", "{fmt::bytes(table.heap_read_blocks.map(|b| b * 8192))}" }
+                    td { class: "mono num", "{fmt::bytes(table.index_read_blocks.map(|b| b * 8192))}" }
+                    td { class: "mono num", "{fmt::bytes(table.total_read_blocks.map(|b| b * 8192))}" }
+                }
+            }
+        })
+        .collect();
+
+    let reads = if io.tables.is_empty() {
+        rsx! {
+            div { class: "card__body",
+                p { class: "muted", style: "margin: 0; font-size: 12.5px;",
+                    "No table in this database has read a block from outside shared buffers."
+                }
+            }
+        }
+    } else {
+        rsx! {
+            table { class: "dt",
+                thead {
+                    tr {
+                        th { "Table" }
+                        th { class: "num", title: "Read from outside shared buffers since the previous minute's tick", "Read (last tick)" }
+                        th { class: "num", "Per second" }
+                        th { class: "num", "Cache hit" }
+                        th { class: "num", title: "Lifetime, since the statistics were reset", "Heap" }
+                        th { class: "num", title: "Lifetime", "Indexes" }
+                        th { class: "num", title: "Lifetime heap + indexes + TOAST", "Total" }
+                    }
+                }
+                tbody { {rows.into_iter()} }
+            }
+        }
+    };
+
+    rsx! {
+        div { class: "card",
+            div { class: "card__header",
+                span { class: "card__title", "Disk I/O" }
+                span { class: "card__subtitle",
+                    if io.io_timing_enabled == Some(true) { "timed" } else { "untimed" }
+                }
+            }
+
+            if track_io_timing == Some(false) {
+                div { class: "card__body", style: "padding-bottom: 0;",
+                    div { class: "banner banner--warn",
+                        code { class: "mono", "track_io_timing" }
+                        " is off, so the I/O wait tiles above read "
+                        b { "—" }
+                        " rather than a number. The block counts below still work — they say "
+                        "how much was read, just not how long it took. Turn it on to measure the time."
+                    }
+                }
+            }
+
+            div { class: "card__body", style: "padding-bottom: 0;",
+                p { class: "muted", style: "margin: 0; font-size: 12.5px;",
+                    "A \"read\" here means "
+                    b { "not served from shared buffers" }
+                    " — the page may still have come from the operating system's cache without the "
+                    "disk moving. That is why the time above matters more than the volume below."
+                }
+            }
+
+            {reads}
+
+            if let Some(writes) = io.writes.clone() {
+                WriteIoRow { writes }
+            } else if let Some(reason) = io.writes_unavailable.clone() {
+                div { class: "card__body",
+                    SectionNotice { state: section::UNAVAILABLE.to_string(), reason: Some(reason) }
+                }
+            }
+        }
+    }
+}
+
+/// The write side — cluster-wide, and stated as such.
+#[component]
+fn WriteIoRow(writes: WriteIo) -> Element {
+    let forced = writes.forced_checkpoint_ratio();
+
+    // The share of WAL that is whole pages copied rather than the change itself.
+    let fpi_note = match (writes.wal_full_page_images, writes.wal_records) {
+        (Some(fpi), Some(records)) if records > 0 => {
+            format!("{} of {} records", fmt::group(fpi), fmt::group(records))
+        }
+        _ => fmt::NONE.to_string(),
+    };
+
+    rsx! {
+        div { class: "card__body",
+            p { class: "card__section-title", "Writes — whole server, not just this database" }
+            div { class: "tiles",
+                StatTile {
+                    label: "WAL".to_string(),
+                    value: match writes.wal_bytes_per_sec {
+                        Some(rate) => fmt::bytes(Some(rate as i64)),
+                        None => fmt::NONE.to_string(),
+                    },
+                    hint: "per second".to_string(),
+                    tone: StateTone::Neutral,
+                    title: Some("Write-ahead log produced per second, across the whole server.".to_string()),
+                }
+                StatTile {
+                    label: "Full-page images".to_string(),
+                    value: fmt::int(writes.wal_full_page_images),
+                    hint: fpi_note,
+                    tone: StateTone::Neutral,
+                    title: Some(
+                        "The first write to a page after each checkpoint copies the whole 8 kB page into WAL. A large share of records means checkpoints are too frequent for the write rate, and the WAL volume above is mostly copies rather than changes."
+                            .to_string(),
+                    ),
+                }
+                StatTile {
+                    label: "Forced checkpoints".to_string(),
+                    value: fmt::ratio(forced),
+                    hint: format!(
+                        "{} of {}",
+                        fmt::int(writes.checkpoints_requested),
+                        fmt::int(
+                            writes
+                                .checkpoints_requested
+                                .zip(writes.checkpoints_timed)
+                                .map(|(requested, timed)| requested + timed)
+                        )
+                    ),
+                    tone: match forced {
+                        Some(ratio) if ratio >= 0.5 => StateTone::Bad,
+                        Some(ratio) if ratio >= 0.33 => StateTone::Warn,
+                        Some(_) => StateTone::Ok,
+                        None => StateTone::Neutral,
+                    },
+                    title: Some(
+                        "Checkpoints forced early because WAL hit max_wal_size, rather than run on the timer. Much above a third means max_wal_size is too small — and every forced checkpoint restarts the full-page-image cost."
+                            .to_string(),
+                    ),
+                }
+                StatTile {
+                    label: "Backend writes".to_string(),
+                    value: fmt::int(writes.buffers_written_by_backends),
+                    hint: "buffers".to_string(),
+                    tone: match writes.buffers_written_by_backends {
+                        Some(count) if count > 0 => StateTone::Warn,
+                        _ => StateTone::Neutral,
+                    },
+                    title: Some(
+                        "Buffers a query backend had to write itself because no clean buffer was free — a query stalling to do the writer's job. Shows — on Postgres 17+, where the counter moved to pg_stat_io."
+                            .to_string(),
+                    ),
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn LongestQueriesCard(activity: Activity) -> Element {
     if !section::is_ready(&activity.state) {
@@ -757,6 +1006,10 @@ fn DatabaseSection(db: DatabaseStats) -> Element {
             }
 
             LoadCard { load: stats.load.clone() }
+            DiskIoCard {
+                io: stats.disk_io.clone(),
+                track_io_timing: stats.server.track_io_timing,
+            }
             TablesCard { tables: stats.tables.clone() }
             LongestQueriesCard { activity: stats.activity.clone() }
         }

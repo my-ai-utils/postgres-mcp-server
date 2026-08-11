@@ -32,6 +32,13 @@ pub struct ServerCapabilities {
     pub can_read_all_stats: bool,
     pub has_pg_stat_statements: bool,
     pub max_connections: i32,
+    /// Whether the server measures how long I/O takes (`track_io_timing`).
+    ///
+    /// **Off by default**, because timing every block read costs something on some
+    /// platforms. With it off `pg_stat_database.blk_read_time` and `blk_write_time`
+    /// are permanently zero — not "no I/O happened", but "nobody was counting" —
+    /// which is exactly the kind of zero this server refuses to publish as a number.
+    pub track_io_timing: bool,
 }
 
 const SQL: &str = r#"
@@ -50,7 +57,8 @@ SELECT
         false
     )                                                                        AS can_read_all_stats,
     EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')  AS has_pg_stat_statements,
-    current_setting('max_connections')::int4                                  AS max_connections
+    current_setting('max_connections')::int4                                  AS max_connections,
+    current_setting('track_io_timing') = 'on'                                 AS track_io_timing
 "#;
 
 impl ServerCapabilities {
@@ -72,6 +80,7 @@ impl ServerCapabilities {
             can_read_all_stats: opt_bool(row, "can_read_all_stats").unwrap_or_default(),
             has_pg_stat_statements: opt_bool(row, "has_pg_stat_statements").unwrap_or_default(),
             max_connections: opt_i32(row, "max_connections").unwrap_or_default(),
+            track_io_timing: opt_bool(row, "track_io_timing").unwrap_or_default(),
         }
     }
 

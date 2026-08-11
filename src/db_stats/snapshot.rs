@@ -1,6 +1,8 @@
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
-use super::{ActivityStats, DbHealth, Section, ServerCapabilities, TablesStats, TopStatements};
+use super::{
+    ActivityStats, DbHealth, DiskIo, Section, ServerCapabilities, TablesStats, TopStatements,
+};
 
 /// Everything the collector knows about one database, as of the last tick.
 ///
@@ -27,4 +29,5 @@ pub struct DbStatsSnapshot {
     pub health: Section<DbHealth>,
     pub tables: Section<TablesStats>,
     pub statements: Section<TopStatements>,
+    pub disk_io: Section<DiskIo>,
 }

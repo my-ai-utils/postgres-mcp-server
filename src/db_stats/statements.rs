@@ -209,23 +209,22 @@ fn build(
         })
         .collect();
 
-    // Sort by what moved in the last window, keeping the lifetime order as the
-    // tiebreak — which is also the whole ordering on the first tick, when nothing
-    // has a delta yet.
-    if items.iter().any(|item| item.delta_exec_ms.is_some()) {
-        items.sort_by(|left, right| {
-            let key = |item: &TopStatement| {
-                (
-                    item.delta_exec_ms.unwrap_or(0.0),
-                    item.total_exec_ms.unwrap_or(0.0),
-                )
-            };
+    // Sort by what moved in the last window, with the lifetime total as the tiebreak
+    // — which is the whole ordering on the first tick, where nothing has a delta yet.
+    // Unconditional rather than only when some delta exists: leaning on the query's
+    // ORDER BY for that case would make the ranking depend on which SQL ran.
+    items.sort_by(|left, right| {
+        let key = |item: &TopStatement| {
+            (
+                item.delta_exec_ms.unwrap_or(0.0),
+                item.total_exec_ms.unwrap_or(0.0),
+            )
+        };
 
-            key(right)
-                .partial_cmp(&key(left))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    }
+        key(right)
+            .partial_cmp(&key(left))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     items.truncate(TOP_N);
 

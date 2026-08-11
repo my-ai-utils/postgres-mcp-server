@@ -80,6 +80,10 @@ pub struct LoadSample {
     pub rows_written_per_sec: Option<f64>,
     pub blks_read_per_sec: Option<f64>,
     pub cache_hit_ratio: Option<f64>,
+    /// Milliseconds per second lost to reads / writes. `None` unless
+    /// `track_io_timing` is on — see [`super::DbHealthRates`].
+    pub io_read_ms_per_sec: Option<f64>,
+    pub io_write_ms_per_sec: Option<f64>,
     pub db_size_bytes: Option<i64>,
     pub backends_total: Option<i64>,
     pub backends_active: Option<i64>,
@@ -108,6 +112,8 @@ impl LoadSample {
             rows_written_per_sec: rates.and_then(|rates| rates.rows_written_per_sec),
             blks_read_per_sec: rates.and_then(|rates| rates.blks_read_per_sec),
             cache_hit_ratio: rates.and_then(|rates| rates.cache_hit_ratio),
+            io_read_ms_per_sec: rates.and_then(|rates| rates.io_read_ms_per_sec),
+            io_write_ms_per_sec: rates.and_then(|rates| rates.io_write_ms_per_sec),
             db_size_bytes: health.and_then(|health| health.db_size_bytes),
             backends_total: activity.and_then(|activity| activity.total_client_backends),
             backends_active: activity.and_then(|activity| activity.active),

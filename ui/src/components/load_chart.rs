@@ -45,6 +45,14 @@ use dioxus::prelude::*;
 /// every 5 seconds, so this is "several ticks missing", not "one ran late".
 const GAP_MS: i64 = 30_000;
 
+/// How far the pointer may be from a sample and still read it.
+///
+/// Same window as [`GAP_MS`], and for the same reason: inside a recording gap there
+/// is no sample to report, so the readout says so instead of snapping to whatever
+/// lies minutes away on either side. Without this the crosshair would happily
+/// display a number from before an outage while hovering the middle of it.
+const SNAP_MS: i64 = GAP_MS;
+
 /// The shared y-axis never scales below this, so an idle hour is drawn as an idle
 /// hour. It is also the threshold worth seeing — one backend executing continuously.
 const MIN_CEILING: f64 = 1.0;
@@ -108,6 +116,15 @@ pub fn shared_ceiling(series: &[LoadSeries]) -> f64 {
     (peak * 1.15).max(MIN_CEILING)
 }
 
+/// The sample nearest `at_unix_ms`, or `None` when the pointer is inside a gap —
+/// further than [`SNAP_MS`] from any sample this series actually has.
+fn sample_at(points: &[LoadChartPoint], at_unix_ms: i64) -> Option<&LoadChartPoint> {
+    points
+        .iter()
+        .min_by_key(|point| (point.at_unix_ms - at_unix_ms).abs())
+        .filter(|point| (point.at_unix_ms - at_unix_ms).abs() <= SNAP_MS)
+}
+
 /// `hh:mm:ss` (UTC) from epoch milliseconds.
 ///
 /// Hand-rolled to keep a date library out of the wasm bundle for one label row, and
@@ -130,8 +147,16 @@ fn LoadPanel(
     ceiling: f64,
     from_unix_ms: i64,
     to_unix_ms: i64,
+    /// The instant the pointer is on, shared by every panel so one crosshair reads
+    /// every database at once. `None` when the pointer is not over the charts.
+    hover: Signal<Option<i64>>,
 ) -> Element {
     let span_ms = (to_unix_ms - from_unix_ms).max(1) as f64;
+
+    // The plot is stretched to the card's width, so a pointer position in CSS pixels
+    // only becomes a time once that width is known. Measured on mount and again on
+    // resize rather than assumed.
+    let mut plot_width = use_signal(|| 0.0_f64);
 
     let x = |at_unix_ms: i64| {
         ((at_unix_ms - from_unix_ms) as f64 / span_ms * VIEW_W).clamp(0.0, VIEW_W)
@@ -192,6 +217,12 @@ fn LoadPanel(
     let threshold_y = y(MIN_CEILING);
     let show_threshold = ceiling > MIN_CEILING * 0.75;
 
+    // What the crosshair is pointing at in *this* series. `None` while the pointer is
+    // away, or over a stretch this database recorded nothing for.
+    let hovered = hover.read().and_then(|at| {
+        sample_at(&series.points, at).map(|point| (point.at_unix_ms, point.value))
+    });
+
     rsx! {
         div { class: "panel",
             div { class: "panel__head",
@@ -200,8 +231,17 @@ fn LoadPanel(
                     span { class: "panel__path mono", "{series.path}" }
                 }
                 div { class: "panel__stats mono",
-                    if let Some(latest) = latest {
+                    // Under the pointer the readout becomes the value at that instant;
+                    // "now" and "peak" stay visible without hovering, so the hover
+                    // layer only ever adds detail — it never gates a number.
+                    if let Some((_, value)) = hovered {
+                        span { class: "panel__stats-hover", title: "Value at the crosshair", "{value:.2}" }
+                    } else if hover.read().is_some() {
+                        span { class: "panel__stats-hover faint", title: "This database recorded nothing here", "—" }
+                    } else if let Some(latest) = latest {
                         span { title: "Most recent sample", "{latest:.2}" }
+                    }
+                    if let Some(_) = latest {
                         span { class: "faint", title: "Highest sample in the window", "peak {peak:.2}" }
                     }
                 }
@@ -230,6 +270,36 @@ fn LoadPanel(
                         view_box: "0 0 {VIEW_W} {VIEW_H}",
                         preserve_aspect_ratio: "none",
 
+                        onmounted: move |evt| async move {
+                            if let Ok(rect) = evt.get_client_rect().await {
+                                plot_width.set(rect.size.width);
+                            }
+                        },
+
+                        onresize: move |evt| {
+                            if let Ok(size) = evt.get_content_box_size() {
+                                plot_width.set(size.width);
+                            }
+                        },
+
+                        // The whole plot is the hit target, so the pointer only has to
+                        // be at the right *time* — never on top of a 2px line.
+                        onmousemove: move |evt| {
+                            let width = *plot_width.read();
+
+                            if width <= 0.0 {
+                                return;
+                            }
+
+                            let fraction = (evt.element_coordinates().x / width).clamp(0.0, 1.0);
+
+                            hover.clone().set(Some(
+                                from_unix_ms + (fraction * span_ms) as i64,
+                            ));
+                        },
+
+                        onmouseleave: move |_| hover.clone().set(None),
+
                         line { class: "chart__grid", x1: "0", x2: "{VIEW_W}", y1: "0", y2: "0" }
                         line {
                             class: "chart__grid chart__grid--base",
@@ -248,6 +318,25 @@ fn LoadPanel(
                             }
                         }
                         {marks.into_iter()}
+
+                        // Drawn last so it sits above the fills. The hairline snaps to
+                        // the sample, not to the raw pointer position — the reader is
+                        // aiming at a moment in time, not at a pixel.
+                        if let Some((at, value)) = hovered {
+                            line {
+                                class: "chart__crosshair",
+                                x1: "{x(at):.2}",
+                                x2: "{x(at):.2}",
+                                y1: "0",
+                                y2: "{VIEW_H}",
+                            }
+                            circle {
+                                class: "chart__cursor-dot",
+                                cx: "{x(at):.2}",
+                                cy: "{y(value):.2}",
+                                r: "3",
+                            }
+                        }
                     }
                 }
             }
@@ -277,6 +366,12 @@ pub fn LoadCharts(
 
     let ceiling = shared_ceiling(&series);
 
+    // One hover state for every panel: the panels share a time axis, so pointing at a
+    // moment in any of them should read every database at that moment. Hovering each
+    // line separately to collect the same four numbers would be the reader doing the
+    // chart's job.
+    let hover = use_signal(|| None::<i64>);
+
     let panels: Vec<Element> = series
         .iter()
         .map(|s| {
@@ -287,19 +382,36 @@ pub fn LoadCharts(
                     ceiling,
                     from_unix_ms,
                     to_unix_ms,
+                    hover,
                 }
             }
         })
         .collect();
+
+    // The instant actually being read, snapped to a real sample rather than to the
+    // pointer's pixel — so the time in the axis row matches the values in the panels.
+    let hovered_at = hover.read().and_then(|at| {
+        series
+            .iter()
+            .filter_map(|s| sample_at(&s.points, at))
+            .min_by_key(|point| (point.at_unix_ms - at).abs())
+            .map(|point| point.at_unix_ms)
+    });
 
     rsx! {
         div { class: "charts",
             {panels.into_iter()}
 
             div { class: "chart__x-axis mono",
-                span { "{clock(from_unix_ms)}" }
-                span { "{clock(from_unix_ms + (to_unix_ms - from_unix_ms) / 2)}" }
-                span { "{clock(to_unix_ms)}" }
+                if let Some(at) = hovered_at {
+                    // Replaces the three fixed labels while hovering: one clear reading
+                    // beats three that the eye has to interpolate between.
+                    span { class: "chart__x-axis-hover", "{clock(at)}" }
+                } else {
+                    span { "{clock(from_unix_ms)}" }
+                    span { "{clock(from_unix_ms + (to_unix_ms - from_unix_ms) / 2)}" }
+                    span { "{clock(to_unix_ms)}" }
+                }
             }
 
             div { class: "chart__footnote",
@@ -389,6 +501,34 @@ mod tests {
         let panels = vec![series(Vec::new()), series(vec![point(0, 2.0)])];
 
         assert!((shared_ceiling(&panels) - 2.3).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_crosshair_snaps_to_the_nearest_sample() {
+        let points = vec![point(0, 0.1), point(5_000, 0.2), point(10_000, 0.3)];
+
+        // Just past the midpoint between the first two.
+        assert_eq!(sample_at(&points, 2_600).unwrap().value, 0.2);
+        // Exactly on one.
+        assert_eq!(sample_at(&points, 10_000).unwrap().value, 0.3);
+        // Slightly outside the series still reads its nearest end.
+        assert_eq!(sample_at(&points, -1_000).unwrap().value, 0.1);
+    }
+
+    #[test]
+    fn the_crosshair_reads_nothing_inside_a_recording_gap() {
+        // Ten minutes missing. Hovering the middle of it must not report the value
+        // from before the outage as though it were current.
+        let points = vec![point(0, 0.9), point(600_000, 0.4)];
+
+        assert!(sample_at(&points, 300_000).is_none());
+        // ...but close to a real sample it reads again.
+        assert_eq!(sample_at(&points, 10_000).unwrap().value, 0.9);
+    }
+
+    #[test]
+    fn a_series_with_no_points_reads_nothing() {
+        assert!(sample_at(&[], 1_000).is_none());
     }
 
     #[test]
