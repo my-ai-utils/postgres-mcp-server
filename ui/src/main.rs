@@ -12,6 +12,11 @@ use pages::*;
 pub enum AppRoute {
     #[route("/")]
     Home {},
+    /// The server's SPA fallback answers index.html for any unmatched path, so a
+    /// deep link here survives a reload — see `StaticFilesMiddleware` in
+    /// `http_server/startup.rs`.
+    #[route("/stats")]
+    Stats {},
 }
 
 fn main() {

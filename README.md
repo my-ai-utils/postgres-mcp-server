@@ -7,9 +7,12 @@ It also serves a small web UI that shows what the agent has been running and gat
 ## What it does
 
 - Listens on HTTP `:8000` and serves **one MCP endpoint per configured database**, each on its own path (`POST /mcp`, `POST /mcp-reporting`, …).
-- Exposes one tool per endpoint: **`sql_request`** — accepts a `sql_request: string`, runs it against *that endpoint's* database, returns rows as JSON.
+- Exposes two tools per endpoint, both bound to *that endpoint's* database and neither taking a database argument:
+  - **`sql_request`** — accepts a `sql_request: string`, runs it, returns rows as JSON.
+  - **`db_stats`** — returns collected statistics (table sizes, heaviest statements, connections, throughput) from a background cache, so it costs the database nothing. See *Statistics*.
 - Exposes one MCP prompt per endpoint: **`write_access_policy`** — explains the write gate to the agent.
-- Serves the admin UI at `/`, Swagger at `/swagger`.
+- Collects per-database statistics in the background and keeps **3 days of history** in a local [`redb`](https://www.redb.org) file.
+- Serves the admin UI at `/` (requests + write access) and `/stats` (statistics), Swagger at `/swagger`.
 
 ## Several databases, one server
 
@@ -17,7 +20,7 @@ Each database is mounted on its own path and is a self-contained MCP server from
 
 The admin UI is the other side of that: it shows *all* of them — a single **Write access** card with one row per database (description, mount path, its own state pill, countdown and *Enable for 10 min* / *+10 min* / *Disable* buttons), and one request log covering all of them with a `Database` column.
 
-The admin API is the deliberate exception, and it is not gated: `GET /api/Settings` lists every mount path and description to anyone who can reach the port, and `POST /api/Settings/McpWrites` will open any of their write windows. The path split separates *clients* from each other; it is not an authorization boundary. See *Limitations*.
+The admin API is the deliberate exception, and it is not gated: `GET /api/Settings` lists every mount path and description to anyone who can reach the port, and `POST /api/Settings/McpWrites` will open any of their write windows. `GET /api/Stats` widens that considerably — it reports **every** database's table names and sizes, its heaviest statements' SQL text and the queries running on it right now. The path split separates *clients* from each other; it is not an authorization boundary. See *Limitations*.
 
 Each database also gets its own:
 
@@ -77,6 +80,81 @@ Columnar (compact, friendly to LLM token budgets):
 Types are mapped per Postgres column type: `bool`, `int2`/`int4`/`int8`/`oid`, `float4`/`float8`, `text`/`varchar`/`bpchar`/`name`, `uuid`, `timestamp`/`timestamptz`, `date`/`time`, `json`/`jsonb`, and `bytea` as a `\x…` hex string. Everything else is unmapped and renders as the placeholder `[unsupported pg type: <name>]` — notably **`numeric`/`decimal`**, and also `interval`, `timetz`, the network types, enums and every array type. Cast those in the query (`price::float8`, `price::text`) if you need the value.
 
 `NULL` becomes a JSON null in a mapped column (so does a value the mapping fails to read). In an unmapped column it does not: that branch never inspects the value, so a NULL `numeric` also comes back as the placeholder string.
+
+## Statistics
+
+The server polls every configured database in the background and publishes the result to the UI's *Statistics* page, to `GET /api/Stats`, and to the `db_stats` MCP tool. **Reading any of those three is a pure cache read** — the 5-second UI poller and an agent's tool call never turn into catalog queries, so the collection cost is fixed no matter who is watching.
+
+### There is no CPU metric in Postgres
+
+Not for a superuser, not for `pg_monitor`: no system view exposes host CPU at all. Reading it needs an agent on the machine or an extension like `pg_proctab`, and this server has neither. Everything under *load* is therefore a **proxy**, and the UI says so in each tooltip:
+
+| Figure | What it really is |
+|---|---|
+| **`busyBackends`** | Δ`pg_stat_database.active_time` over wall-clock — backend-seconds of execution per second. `0.20` means the database was executing something 20% of the time; `3.0` means three backends were busy on average. Counts I/O and lock waits as busy, and sees nothing outside this database. Needs Postgres **14+**. |
+| **`execMsPerSec`** (per statement) | The same idea from `pg_stat_statements`: milliseconds of execution per wall-clock second. `1000` is one backend saturated by that statement alone. This is what answers *which* query is burning the server. |
+| `activeTime` / `sessionTime` | The raw counters the first row is derived from. |
+
+Sizes, by contrast, are exact and need no privileges: `pg_total_relation_size` split into heap / indexes / TOAST, plus row estimates, scan counts and last vacuum/analyze, for the **top 25 tables by total size** (the response says `top 25 of 812`, never implying the list is complete). Row counts are planner estimates from `pg_stat_user_tables`, not `count(*)` — exact counts would mean a full scan of every listed table, once a minute.
+
+### What an admin account changes
+
+Only the parts that read *other users'* rows. Postgres returns a row per backend and per statement to everyone, but blanks `state`, `query` and `wait_event` for backends the account does not own unless it is a member of **`pg_monitor`** or **`pg_read_all_stats`** (superusers inherit both).
+
+So an ordinary account still gets correct sizes and correct database-wide counters, but an undercounted and textless view of activity. That is reported rather than hidden: `canReadAllStats` travels to the UI as a `limited stats` badge, and the counts it undermines are published next to `stateUnknown` — the number of backends this account cannot see — with a banner naming the role to grant.
+
+`pg_stat_statements` is a separate matter: it must be **installed** (`shared_preload_libraries`, then `CREATE EXTENSION`) and needs Postgres **13+** for the `total_exec_time` column. When it is missing the *load* section comes back `unavailable` with a reason saying which of the two is the problem, rather than as an empty list.
+
+### Section states
+
+Every section reports one of `pending` (no tick yet), `ready`, or `unavailable` **with a reason**. They are kept distinct on purpose: "the poller has not run", "the extension is not installed" and "this database has no tables" all look identical once flattened to *no data*, and each calls for a different reaction. A database that is simply unreachable reports the driver error once in `lastError` instead of repeating it in all four sections.
+
+Numbers are `null` rather than `0` when Postgres genuinely cannot answer — `idx_scans` on a table no index was ever used on, `query` on a backend this account may not inspect, `busyBackends` before Postgres 14. The UI renders those as `—`. A zero would read as "nothing happened" when the truth is "this server, or this account, cannot tell you".
+
+### Rates, not counters
+
+Everything in `pg_stat_database` and `pg_stat_statements` is cumulative since the last reset, which answers "how many commits has this database ever done" — a question nobody is asking. The collector keeps the previous sample and publishes the difference, so `commitsPerSec`, `cacheHitRatio` and `busyBackends` describe the last window rather than all time. (The lifetime cache hit ratio is also reported, labelled as such: it is nearly always a flattering 0.99 because it is dominated by whatever ran on the day the statistics were last reset.)
+
+If a counter goes backwards, or `stats_reset` changes between two samples, that window's rates are reported as **unknown** rather than as a negative rate or a fabricated zero. The next tick recovers on its own.
+
+### Collection cadence
+
+| Timer | Every | What |
+|---|---|---|
+| `DbStatsFast` | **5 s** | `pg_stat_activity` counts + longest queries, `pg_stat_database` counters → also appended to history |
+| `DbStatsSlow` | **60 s** | capabilities, table sizes, `pg_stat_statements` |
+| `DbStatsHourlyHistory` | **1 h** | appends table sizes + statement costs to history, then deletes everything past the retention horizon |
+
+Databases are collected **concurrently**, so one unreachable mount cannot hold up another's numbers. Each query is bounded twice: the driver's own 5-second timeout, plus a hard 10-second ceiling — `my-postgres` retries underneath its timeout, and against an unreachable host a single call was measured at ~85 seconds, which is long enough to wedge the collection timer entirely.
+
+Statistics queries never go through [`sql_guard`](src/sql_guard/) and are **never written to the request log**. They are not the agent's SQL, and a 5-second poller would evict the agent's own 100 entries within minutes.
+
+### History
+
+Kept for **3 days** in a single file, swept hourly:
+
+- **load samples** every 5 seconds (`busyBackends`, transaction and I/O rates, cache hit ratio, connection counts, database size),
+- **table sizes** and **statement costs** hourly — a table's size over three days is a growth curve, and sampling it 60 times an hour would store the same number 60 times while repeating every statement's SQL text alongside it.
+
+A tick against an unreachable database writes **nothing**, so the series has a gap rather than a run of zeroes that would plot as "no load".
+
+Read it at `GET /api/Stats/History` (see *HTTP API*). The UI's *Metrics history* card shows whether anything is actually being recorded — a full disk or a read-only home directory otherwise looks exactly like a healthy server, because every live card keeps updating.
+
+#### Why redb and not SQLite
+
+The store had to be **pure Rust, with no Rust→C marshalling**. That rules out every SQLite option: `rusqlite`/`libsqlite3-sys` compile the C amalgamation, `async-sqlite` wraps `rusqlite`, and so does the in-house `my-sqlite` — so the library this project would otherwise have used is excluded by the constraint, not by its API. `turso`, the pure-Rust SQLite rewrite, is still pre-1.0 and pulls `mimalloc` (C) in its default features; `sled` has no release since 2021.
+
+Losing SQL costs nothing here, because none of the three access patterns needs it: append a sample, scan a time window, delete everything past the horizon. Those are range operations on an ordered B-tree, which is what `redb` is.
+
+Rows are keyed `(unix_micros, db_path)`, in that order, so retention is **one bounded range sweep** covering every mount at once. Keyed the other way round the sweep would have to be repeated per configured mount, and rows belonging to a mount since removed from the settings file would never be collected at all — a leak that only shows up months later.
+
+#### Where the file lives
+
+`~/.postgres-mcp-server-metrics.redb`, next to the settings file. `POSTGRES_MCP_METRICS_PATH` overrides it (`~` is expanded either way).
+
+It is an environment variable rather than a settings key because every field in the settings model is required with no defaults anywhere — adding one there would stop every existing settings file from parsing, for a path that has a perfectly good default. **In Docker it matters**: the default lands inside the container's `/root` and is lost on restart, so point the variable at a mounted volume if you want history to survive.
+
+A history file that cannot be opened **disables history and is reported**, but never stops the boot: proxying SQL and gating writes do not depend on it.
 
 ## Configuration
 
@@ -140,8 +218,14 @@ Then open <http://localhost:8000/>.
 ```sh
 cargo build --release
 docker build -t postgres-mcp-server .
-docker run --rm -p 8000:8000 -v ~/.postgres-mcp-server:/root/.postgres-mcp-server postgres-mcp-server
+docker run --rm -p 8000:8000 \
+  -v ~/.postgres-mcp-server:/root/.postgres-mcp-server \
+  -v postgres-mcp-metrics:/data \
+  -e POSTGRES_MCP_METRICS_PATH=/data/metrics.redb \
+  postgres-mcp-server
 ```
+
+The volume and `POSTGRES_MCP_METRICS_PATH` are only needed if the 3 days of metrics history should survive a restart — without them the file is written inside the container and thrown away with it. Everything else keeps working either way; see *Statistics → Where the file lives*.
 
 ## Building the UI
 
@@ -154,7 +238,9 @@ cd ui && ./build.sh      # dx build --release --web -> cache-bust index.html -> 
 
 It needs `dx` (**0.7.10** — it must match the `dioxus` version in `ui/Cargo.toml`, or dx refuses to build) and `python3`: `build.sh` runs `build.py` to append cache-busting query strings to the asset URLs in `index.html`. It also does `rm -rf ../wwwroot` before copying, so that directory is replaced wholesale — anything put there by hand is gone after a build.
 
-The stylesheet is generated too: `ui/build.rs` concatenates `ui/css/01-tokens.css` … `05-databases.css` into `ui/public/assets/app.css`. That file is committed and so looks like a source file, but editing it is pointless — the next build overwrites it. A new `.css` file is picked up only once it is added to the `CssCompiler` chain in `ui/build.rs`.
+`build.sh` wipes **dx's own output directory** first, too. dx content-hashes the js/wasm bundle names and never removes the previous ones, so after two builds its output holds two of each and the `cp -R` would copy all of them into `wwwroot` to be committed — hundreds of kilobytes of wasm that `index.html` does not reference. The wipe is what makes "one build, one bundle" true; if you invoke `dx build` by hand, expect to clean up after it.
+
+The stylesheet is generated too: `ui/build.rs` concatenates `ui/css/01-tokens.css` … `06-stats.css` into `ui/public/assets/app.css`. That file is committed and so looks like a source file, but editing it is pointless — the next build overwrites it. A new `.css` file is picked up only once it is added to the `CssCompiler` chain in `ui/build.rs`.
 
 Use `dx build` / `dx serve` for that crate — never `cargo build`. CI does not build the UI, so **commit `wwwroot/` whenever you change `ui/`**.
 
@@ -195,17 +281,23 @@ The session is established automatically on first request (`initialize`); subseq
 | `GET /api/Settings` | every configured database: path, description, write-access state + seconds left |
 | `POST /api/Settings/McpWrites` | `{ "path": string, "enabled": bool }` — open/close the 10-minute window of one database. `200` returns the same body as `GET /api/Settings`, so the new countdown needs no follow-up read; `404` if that path is not configured |
 | `GET /api/Requests` | last 100 SQL requests across all databases, newest first; each carries the `db` it ran on |
+| `GET /api/Stats` | last collected statistics for every database, plus the state of the history file. A pure cache read — it never queries Postgres |
+| `GET /api/Stats/History` | `?path=/mcp&hours=3&section=load\|tables\|statements` — one database's recorded series, oldest first. `hours` is clamped to 1…72; `404` if the path is not a configured mount, while a disabled or unreadable history file is a `200` carrying an `error` and empty series, because the mount itself is fine |
 | `/swagger` | generated API docs |
 
 ## Limitations
 
 - **No parameterized queries** — the SQL string is executed as-is.
-- **Unauthenticated** — anyone who can reach the port can query any configured database, and can open any write window. The path separation isolates *clients* from each other, not the server from the network. Do not expose it to untrusted networks.
+- **Unauthenticated** — anyone who can reach the port can query any configured database, can open any write window, and can read `GET /api/Stats`, which reports every database's table names and sizes, its heaviest statements' SQL text and what is running on it right now. The path separation isolates *clients* from each other, not the server from the network. Do not expose it to untrusted networks.
 - **One statement per call** — several statements separated by `;` are refused; the extended protocol cannot run them.
 - **10s query timeout** is hardcoded.
 - **Adding or removing a database needs a restart** — each one is an HTTP middleware registered at startup. Only `conn_string` is picked up live, and deleting an entry neither takes its endpoint down nor cuts its connection; see *What a running server picks up*.
 - **The request log is shared**: 100 entries total, not 100 per database, so a busy database can push a quiet one's history out. It also truncates SQL at 4096 bytes.
-- **`numeric`/`decimal` and other unmapped types** come back as `[unsupported pg type: …]`, not as values — cast them in the query.
+- **`numeric`/`decimal` and other unmapped types** come back as `[unsupported pg type: …]`, not as values — cast them in the query. (This affects `sql_request` only; the statistics queries are hand-written with explicit casts and read their columns typed.)
+- **No host CPU metric** — Postgres does not expose one to any role. `busyBackends` and `execMsPerSec` are execution-time proxies; see *Statistics*.
+- **`busyBackends` needs Postgres 14+**, and the *load* section needs `pg_stat_statements` on **13+**. Both report `unavailable` with the reason rather than showing zeroes.
+- **Statistics are per mount, scoped to that mount's database.** `pg_stat_activity` and `pg_stat_statements` are cluster-wide, but the long-running queries and the statement list are filtered to the current database so an endpoint never leaks another database's SQL text. Connection *counts* are cluster-wide, since a number leaks nothing and `max_connections` is what they have to be read against.
+- **History resolution is fixed** — 5 s for load, 1 h for sizes and statements — and retention is a hardcoded 3 days, swept hourly, so it can overshoot the horizon by up to an hour.
 
 ## Project layout
 
@@ -213,19 +305,25 @@ The session is established automatically on first request (`initialize`); subseq
 src/
 ├── main.rs              # bootstrap
 ├── settings.rs          # ~/.postgres-mcp-server reader + path/database validation
-├── app/                 # AppContext: the databases + shared request log
-│                        #   db_ctx.rs: one database — connection + its write window
+├── app/                 # AppContext: the databases + shared request log + metrics store
+│                        #   db_ctx.rs: one database — connection, write window, stats cache
+├── db_stats/            # statistics: one module per section (capabilities, activity,
+│                        #   health, tables, statements), the per-database cache,
+│                        #   the collection timers, the redb history store, and the
+│                        #   wire model shared by /api/Stats and the db_stats tool
 ├── http_server/         # MyHttpServer + controllers/swagger/static wiring,
 │                        #   plus one MCP middleware per database
-├── mcp_service/         # sql_request tool + write_access_policy prompt (per database)
-├── postgres/            # SQL execution + row → JSON conversion
+├── mcp_service/         # sql_request + db_stats tools, write_access_policy prompt
+│                        #   (one of each per database)
+├── postgres/            # SQL execution + row → JSON conversion; query_typed is the
+│                        #   separate, unlogged and ungated path the collector uses
 ├── sql_guard/           # read/write classifier + the write gate
 └── sql_log/             # in-memory ring buffer of the last 100 requests
 ui/                      # Dioxus WASM admin UI  ->  builds into wwwroot/
-├── css/                 #   stylesheet sources (01-tokens … 05-databases);
+├── css/                 #   stylesheet sources (01-tokens … 06-stats);
 │                        #   ui/build.rs concatenates them into
 ├── public/              #   public/assets/app.css — generated, committed
-└── src/                 #   pages / components / api client
+└── src/                 #   pages (/ and /stats) / components / api client
 wwwroot/                 # built UI, committed; served at /
 Dockerfile               # generated by build.rs (ci-utils) — do not hand-edit
 ```
@@ -236,3 +334,4 @@ Dockerfile               # generated by build.rs (ci-utils) — do not hand-edit
 - [`my-http-server`](https://github.com/MyJetTools/my-http-server) — HTTP runtime
 - [`my-postgres`](https://github.com/MyJetTools/my-postgres) — Postgres client
 - [`my-ai-agent`](https://github.com/my-ai-utils/my-ai-agent) — JSON schema derivation for tool I/O
+- [`redb`](https://www.redb.org) — pure-Rust embedded B-tree for the metrics history (see *Statistics → Why redb and not SQLite*)

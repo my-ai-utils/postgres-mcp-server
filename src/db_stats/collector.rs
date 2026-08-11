@@ -1,0 +1,321 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use rust_extensions::MyTimerTick;
+use rust_extensions::date_time::DateTimeAsMicroseconds;
+
+use crate::app::{AppContext, DbContext};
+
+use super::{FastTick, LoadSample, Section, ServerCapabilities, SlowTick};
+
+/// How often the cheap sections are refreshed, and the resolution of the stored
+/// load series. Connection counts and the busy-backends figure are only
+/// interesting if they are roughly live, and both queries are a single aggregate
+/// over an in-memory view.
+pub const FAST_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often the expensive sections are refreshed in memory.
+/// `pg_total_relation_size` over every table in the database is not something to
+/// run every 5 seconds, and a table does not change size meaningfully faster than
+/// this.
+pub const SLOW_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often table sizes and statement costs are appended to history, and how
+/// often expired rows are swept.
+///
+/// Hourly rather than every slow tick: a table's size over three days is a growth
+/// curve, and sampling it 60 times an hour would store the same number 60 times
+/// while repeating every statement's SQL text alongside it. Sweeping on the same
+/// timer means retention can overshoot by up to an hour, which on a three-day
+/// horizon is under 1.5% and buys one timer instead of two.
+pub const HOURLY_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Deliberately shorter than the 10 seconds [`crate::postgres::PostgresAccess::do_request`]
+/// gives the agent's own SQL: a wedged database should cost one collection tick,
+/// not stall the timer.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Every timer iteration gets a ceiling of its own, as a backstop behind the
+/// per-query bound in [`crate::postgres::PostgresAccess::query_typed`].
+///
+/// Databases are collected concurrently, so this bounds the slowest single
+/// database rather than their sum. One database's tick makes at most three
+/// sequential queries, each hard-bounded at twice [`QUERY_TIMEOUT`], so 30 seconds
+/// is the real worst case — and an unreachable database costs only the first of the
+/// three, because the tick gives up once capabilities fail. The margin is
+/// deliberate: this timer firing means something is wrong that the query bound did
+/// not catch, and it should not be reachable in ordinary operation.
+const ITERATION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What a section says when the database itself could not be reached. The driver
+/// error is reported once, in [`super::DbStatsSnapshot::last_error`], instead of
+/// being repeated in all four sections.
+const UNREACHABLE: &str = "Not collected — the database could not be reached on this tick.";
+
+pub struct FastStatsTimer {
+    app: Arc<AppContext>,
+}
+
+impl FastStatsTimer {
+    pub fn new(app: Arc<AppContext>) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait::async_trait]
+impl MyTimerTick for FastStatsTimer {
+    async fn tick(&self) {
+        let mut running = tokio::task::JoinSet::new();
+
+        for db in &self.app.databases {
+            running.spawn(collect_fast(db.clone()));
+        }
+
+        let mut samples = Vec::with_capacity(self.app.databases.len());
+
+        while let Some(finished) = running.join_next().await {
+            // A panic inside one database's collection must not cost the others
+            // their sample; JoinSet reports it as an Err here.
+            if let Ok(Some(sample)) = finished {
+                samples.push(sample);
+            }
+        }
+
+        if samples.is_empty() {
+            return;
+        }
+
+        // One commit for the whole tick — see `MetricsStore`'s module docs.
+        if let Err(err) = self
+            .app
+            .metrics
+            .write_load(DateTimeAsMicroseconds::now(), samples)
+            .await
+        {
+            self.app.metrics_write_error.set(Some(err));
+            return;
+        }
+
+        self.app.metrics_write_error.set(None);
+    }
+}
+
+pub struct SlowStatsTimer {
+    app: Arc<AppContext>,
+}
+
+impl SlowStatsTimer {
+    pub fn new(app: Arc<AppContext>) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait::async_trait]
+impl MyTimerTick for SlowStatsTimer {
+    async fn tick(&self) {
+        let mut running = tokio::task::JoinSet::new();
+
+        for db in &self.app.databases {
+            running.spawn(collect_slow(db.clone()));
+        }
+
+        while running.join_next().await.is_some() {}
+    }
+}
+
+/// Appends the hourly history rows, then deletes everything past the retention
+/// horizon.
+///
+/// Reads the caches the slow timer has already filled rather than querying
+/// Postgres again — the numbers are at most a minute old, which is far inside an
+/// hourly sample, and it keeps history writing off the database entirely.
+pub struct HourlyHistoryTimer {
+    app: Arc<AppContext>,
+}
+
+impl HourlyHistoryTimer {
+    pub fn new(app: Arc<AppContext>) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait::async_trait]
+impl MyTimerTick for HourlyHistoryTimer {
+    async fn tick(&self) {
+        if !self.app.metrics.is_enabled() {
+            return;
+        }
+
+        let at = DateTimeAsMicroseconds::now();
+
+        let mut error = None;
+
+        for db in &self.app.databases {
+            let snapshot = db.stats.get();
+
+            if let Err(err) = self
+                .app
+                .metrics
+                .write_hourly(at, &snapshot.tables, &snapshot.statements, db.path.as_str())
+                .await
+            {
+                error = Some(err);
+            }
+        }
+
+        match self.app.metrics.collect_garbage().await {
+            Ok(collected) => {
+                if collected.total() > 0 {
+                    println!(
+                        "Metrics history: deleted {} expired rows (load {}, table sizes {}, \
+                         statements {})",
+                        collected.total(),
+                        collected.load,
+                        collected.table_sizes,
+                        collected.statements
+                    );
+                }
+            }
+            Err(err) => error = Some(err),
+        }
+
+        if error.is_some() {
+            self.app.metrics_write_error.set(error);
+        }
+    }
+}
+
+/// Capabilities, from the cache if a tick has already read them.
+///
+/// On the first fast tick after start-up there is nothing cached yet, and waiting
+/// for the slow timer would leave the page empty for up to a minute — so the fast
+/// tick reads them itself, once.
+async fn capabilities_for_fast_tick(db: &Arc<DbContext>) -> Result<ServerCapabilities, String> {
+    if let Some(capabilities) = db.stats.capabilities() {
+        return Ok(capabilities);
+    }
+
+    let capabilities = super::collect_capabilities(&db.postgres, QUERY_TIMEOUT).await;
+
+    db.stats
+        .apply_capabilities(Section::from_result(capabilities.clone()));
+
+    capabilities
+}
+
+/// Refreshes one database's live sections and returns its history row, if the tick
+/// produced anything worth storing.
+async fn collect_fast(db: Arc<DbContext>) -> Option<(String, LoadSample)> {
+    let capabilities = match capabilities_for_fast_tick(&db).await {
+        Ok(capabilities) => capabilities,
+        Err(err) => {
+            // Nothing else can be built without knowing the server version, and
+            // this particular failure means the connection is down rather than one
+            // view being off-limits.
+            db.stats.apply_fast_tick(FastTick {
+                activity: Section::Unavailable(UNREACHABLE.to_string()),
+                health: Section::Unavailable(UNREACHABLE.to_string()),
+                last_error: Some(err),
+            });
+
+            // Deliberately no row: a gap in the series is the truthful record of a
+            // database that was unreachable, whereas a row of nulls would plot as
+            // "zero load".
+            return None;
+        }
+    };
+
+    let activity =
+        super::collect_activity(&db.postgres, capabilities.server_version_num, QUERY_TIMEOUT).await;
+
+    let health = super::collect_health(&db.postgres, &capabilities, QUERY_TIMEOUT).await;
+
+    db.stats.apply_fast_tick(FastTick {
+        activity: Section::from_result(activity),
+        health: Section::from_result(health),
+        last_error: None,
+    });
+
+    // Read back what was published, so the stored row is exactly what the UI shows
+    // — including the rates, which only exist once the cache has diffed this sample
+    // against the previous one.
+    let snapshot = db.stats.get();
+
+    LoadSample::new(&snapshot.health, &snapshot.activity)
+        .map(|sample| (db.path.as_str().to_string(), sample))
+}
+
+async fn collect_slow(db: Arc<DbContext>) {
+    let capabilities = super::collect_capabilities(&db.postgres, QUERY_TIMEOUT).await;
+
+    let capabilities = match capabilities {
+        Ok(capabilities) => capabilities,
+        Err(err) => {
+            db.stats.apply_slow_tick(SlowTick {
+                server: Section::Unavailable(err),
+                tables: Section::Unavailable(UNREACHABLE.to_string()),
+                statements: Section::Unavailable(UNREACHABLE.to_string()),
+            });
+            return;
+        }
+    };
+
+    let tables = super::collect_tables(&db.postgres, QUERY_TIMEOUT).await;
+
+    let previous_statements = db.stats.previous_statements();
+
+    let statements = super::collect_statements(
+        &db.postgres,
+        &capabilities,
+        previous_statements.as_ref(),
+        QUERY_TIMEOUT,
+    )
+    .await;
+
+    db.stats.apply_slow_tick(SlowTick {
+        server: Section::Ready(capabilities),
+        tables: Section::from_result(tables),
+        statements: Section::from_result(statements),
+    });
+}
+
+/// Starts the three collection timers.
+///
+/// `set_first_tick_before_delay` matters more than it looks: without it the admin
+/// page would show four "pending" cards for the first 60 seconds after a restart,
+/// which is indistinguishable from the collector being broken — and the retention
+/// sweep would not run until an hour in.
+pub fn start(app: &Arc<AppContext>) {
+    start_timer(
+        app,
+        "DbStatsFast",
+        FAST_INTERVAL,
+        Arc::new(FastStatsTimer::new(app.clone())),
+    );
+
+    start_timer(
+        app,
+        "DbStatsSlow",
+        SLOW_INTERVAL,
+        Arc::new(SlowStatsTimer::new(app.clone())),
+    );
+
+    start_timer(
+        app,
+        "DbStatsHourlyHistory",
+        HOURLY_INTERVAL,
+        Arc::new(HourlyHistoryTimer::new(app.clone())),
+    );
+}
+
+fn start_timer(
+    app: &Arc<AppContext>,
+    name: &str,
+    interval: Duration,
+    tick: Arc<dyn MyTimerTick + Send + Sync + 'static>,
+) {
+    let mut timer = rust_extensions::MyTimer::new_with_execute_timeout(interval, ITERATION_TIMEOUT);
+    timer.set_first_tick_before_delay();
+    timer.register_timer(name, tick);
+    timer.start(app.app_states.clone(), my_logger::LOGGER.clone());
+}

@@ -1,3 +1,6 @@
+mod db_stats;
+pub use db_stats::*;
+
 mod request_error;
 pub use request_error::*;
 

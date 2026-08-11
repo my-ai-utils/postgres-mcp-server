@@ -6,7 +6,7 @@ use my_http_server::{HttpConnectionsCounter, MyHttpServer, StaticFilesMiddleware
 
 use crate::{
     app::{APP_VERSION, AppContext, DbContext},
-    mcp_service::{PostgresMcpService, WriteAccessPolicyPromptHandler},
+    mcp_service::{DbStatsMcpService, PostgresMcpService, WriteAccessPolicyPromptHandler},
 };
 
 pub async fn setup_server(app: &Arc<AppContext>) -> HttpConnectionsCounter {
@@ -65,6 +65,7 @@ fn build_mcp_middleware(app: &Arc<AppContext>, db: &Arc<DbContext>) -> Arc<McpMi
         app.clone(),
         db.clone(),
     )));
+    mcp_middleware.register_tool_call(Arc::new(DbStatsMcpService::new(db.clone())));
     mcp_middleware.register_prompt(Arc::new(WriteAccessPolicyPromptHandler::new(db.clone())));
 
     Arc::new(mcp_middleware)
@@ -80,7 +81,9 @@ fn build_instructions(db: &Arc<DbContext>) -> String {
     format!(
         "You can use this server to query your Postgres database: {}. Writes are refused unless \
          the user has granted write access in the server UI — see the 'write_access_policy' \
-         prompt.",
+         prompt. 'db_stats' reports collected statistics for this database — table sizes, the \
+         heaviest statements, connections and throughput — from a background cache, so it costs \
+         the database nothing and is worth reading before querying an unfamiliar schema.",
         db.description
     )
 }

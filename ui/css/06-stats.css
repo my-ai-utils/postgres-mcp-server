@@ -1,0 +1,194 @@
+/* === Statistics page: nav, stat tiles, badges, banners === */
+
+/* --- Topbar nav ---
+   Sits between the brand and the actions. The brand keeps `flex: 1`, so the nav
+   is pushed to the middle and the actions stay pinned right. */
+.topbar__nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.topbar__nav-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 11px;
+    border-radius: var(--r-md);
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    white-space: nowrap;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+
+.topbar__nav-link:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+}
+
+.topbar__nav-link--active {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    font-weight: 600;
+}
+
+/* --- One database's block --- */
+.db-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.db-stats__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.db-stats__title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+}
+
+.db-stats__collected {
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+/* --- Privilege / capability badges --- */
+.badges {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--bg-elev);
+}
+
+.badges__summary {
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+/* --- Stat tiles ---
+   auto-fit rather than a fixed column count: the row reflows on a narrow window
+   instead of the numbers shrinking out of readability. */
+.tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    gap: 8px;
+}
+
+.tile {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    border-radius: var(--r-md);
+    background: var(--bg-elev);
+    min-width: 0;
+}
+
+.tile__label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tile__value {
+    font-size: 19px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    line-height: 1.2;
+}
+
+.tile__hint {
+    font-size: 10.5px;
+    color: var(--text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* The tone lives on the left keyline only. Tinting the whole tile would make a
+   dashboard of ordinary numbers look like a wall of alarms. */
+.tile--ok {
+    border-left-color: var(--ok);
+}
+
+.tile--warn {
+    border-left-color: var(--warn);
+}
+
+.tile--bad {
+    border-left-color: var(--danger);
+}
+
+.tile--neutral {
+    border-left-color: var(--border-strong);
+}
+
+/* --- Banners: something the operator has to act on --- */
+.banner {
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    font-size: 12.5px;
+    line-height: 1.45;
+}
+
+.banner--warn {
+    background: var(--warn-soft);
+    border-color: var(--warn);
+    color: var(--text);
+}
+
+.banner--bad {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+    color: var(--text);
+}
+
+/* --- "Nothing here, and why" --- */
+.notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+
+/* The pill is used label-less here, purely as the tone dot. */
+.notice .state {
+    flex-shrink: 0;
+    margin-top: 3px;
+}
+
+/* --- Inline tone for table cells ---
+   A dead-tuple count or an unused index is a property of one number in a row, so
+   it colours the number rather than the whole row. */
+.state--warn-text {
+    color: var(--warn);
+    font-weight: 600;
+}
+
+.state--bad-text {
+    color: var(--danger);
+    font-weight: 600;
+}

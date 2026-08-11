@@ -37,6 +37,74 @@ impl PostgresAccess {
         }
     }
 
+    /// Runs SQL the **server itself** issues — the statistics queries in
+    /// [`crate::db_stats`] — and maps the rows into `TEntity`.
+    ///
+    /// Deliberately a separate path from [`Self::do_request`], not a flag on it:
+    ///
+    /// - it never consults the write gate, because these statements are not the
+    ///   agent's and there is no user to grant anything (they are all plain
+    ///   catalog reads, and the blunt keyword pass would refuse half of them for
+    ///   mentioning `pg_stat_user_tables.n_tup_upd` anyway);
+    /// - it is never written to the request log, because a 5-second poller would
+    ///   evict the agent's own 100 entries within minutes and leave the operator
+    ///   staring at a log of the server talking to itself;
+    /// - it carries its own, shorter timeout, so a wedged database delays one
+    ///   collection tick instead of holding it for the full 10 seconds the tool
+    ///   allows.
+    ///
+    /// `process_name` is `&'static str` because every caller is a fixed,
+    /// hand-written query — it labels the request in the driver's own
+    /// diagnostics, and there is no user input to put there.
+    ///
+    /// `timeout` is handed to the driver, **and** the whole call is bounded at
+    /// twice that. The second bound is not belt-and-braces: `sql_request_time_out`
+    /// applies to one attempt, and against an unreachable host the driver retries
+    /// underneath it — measured at ~85 seconds for a single call, which blew
+    /// through the collection timer's own iteration timeout and left the slow
+    /// sections stuck on "pending" forever instead of reporting that the database
+    /// was down. The outer bound turns "wedged collector" into "one tick reported a
+    /// timeout".
+    ///
+    /// The two are deliberately not equal. A genuinely slow query is the driver's
+    /// to cancel, because it cancels server-side and hands the connection back
+    /// clean; dropping the future instead would return a connection with unread
+    /// results to the pool. So the outer bound sits far enough above the driver's
+    /// that it only ever fires when the driver itself is stuck — i.e. when there is
+    /// no connection to dirty.
+    pub async fn query_typed<TEntity: SelectEntity + Send + Sync + 'static>(
+        &self,
+        process_name: &'static str,
+        sql: &str,
+        timeout: Duration,
+    ) -> Result<Vec<TEntity>, String> {
+        let sql_data = SqlData {
+            sql: sql.to_string(),
+            values: SqlValues::Empty,
+        };
+
+        // Bound to a local: the future below borrows it, so an inline temporary
+        // would not live long enough to be awaited.
+        let ctx = RequestContext {
+            started: DateTimeAsMicroseconds::now(),
+            process_name: Arc::new(process_name.to_string()),
+            sql_request_time_out: timeout,
+            is_debug: false,
+        };
+
+        let query = self.postgres.execute_sql_as_vec(sql_data, &ctx);
+
+        match tokio::time::timeout(timeout * 2, query).await {
+            Ok(result) => result.map_err(|err| format!("{:?}", err)),
+            Err(_) => Err(format!(
+                "'{}' gave up after {}s — the driver did not return, which usually means the \
+                 database is unreachable and it is still retrying.",
+                process_name,
+                (timeout * 2).as_secs()
+            )),
+        }
+    }
+
     pub async fn do_request(&self, sql: String) -> Result<SqlResponseResult, String> {
         let sql_data = SqlData {
             sql: sql.to_string(),

@@ -7,6 +7,14 @@ DX_OUT="${SCRIPT_DIR}/target/dx/postgres-mcp-ui/release/web/public"
 
 cd "${SCRIPT_DIR}"
 
+# dx content-hashes the js/wasm bundle names and never removes the previous ones
+# from its output directory, so after two builds that directory holds two of each.
+# `cp -R` below would copy all of them into wwwroot and they would be committed —
+# hundreds of kilobytes of wasm that index.html does not reference. Wiping the
+# output first is what makes "one build, one bundle" true.
+echo ">> cleaning ${DX_OUT}"
+rm -rf "${DX_OUT}"
+
 echo ">> dx build --release --web"
 dx build --release --web
 

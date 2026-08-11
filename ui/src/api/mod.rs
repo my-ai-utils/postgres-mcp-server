@@ -27,7 +27,10 @@ use flurl::body::HttpRequestBody;
 use flurl::{FlUrl, FlUrlError, FlUrlResponse};
 use serde::de::DeserializeOwned;
 
-use crate::models::{RequestError, ServerSettings, SetMcpWritesRequest, SqlRequestModel, SqlRequestsResponse};
+use crate::models::{
+    RequestError, ServerSettings, ServerStats, SetMcpWritesRequest, SqlRequestModel,
+    SqlRequestsResponse,
+};
 
 fn is_success(status: u16) -> bool {
     (200..300).contains(&status)
@@ -94,6 +97,16 @@ pub async fn set_mcp_writes(path: String, enabled: bool) -> Result<(), RequestEr
         .await;
 
     handle_http_empty(response).await
+}
+
+/// The last statistics the server's background collector published for every
+/// database.
+///
+/// A pure cache read on the server side — polling this does not query Postgres.
+pub async fn get_server_stats() -> Result<ServerStats, RequestError> {
+    let response = FlUrl::new("/api/Stats").get().await;
+
+    handle_http_response(response).await
 }
 
 /// The last 100 executed SQL requests, newest first.

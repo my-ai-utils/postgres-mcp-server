@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 mod app;
+mod db_stats;
 mod http_server;
 mod mcp_service;
 mod postgres;
@@ -34,6 +35,10 @@ async fn main() {
     let app_ctx = Arc::new(app_ctx);
 
     crate::http_server::setup_server(&app_ctx).await;
+
+    // Started after the port is bound: the first tick reaches out to every
+    // database, and a slow one must not hold up the UI coming up.
+    crate::db_stats::collector::start(&app_ctx);
 
     app_ctx.app_states.wait_until_shutdown().await;
 }

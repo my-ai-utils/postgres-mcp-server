@@ -19,5 +19,13 @@ pub fn build(app: &Arc<AppContext>) -> ControllersMiddleware {
         app.clone(),
     )));
 
+    result.register_get_action(Arc::new(super::stats_controller::GetStatsAction::new(
+        app.clone(),
+    )));
+
+    result.register_get_action(Arc::new(
+        super::stats_controller::GetStatsHistoryAction::new(app.clone()),
+    ));
+
     result
 }

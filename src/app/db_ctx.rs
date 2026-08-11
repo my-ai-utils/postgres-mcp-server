@@ -37,6 +37,14 @@ pub struct DbContext {
     pub description: String,
     pub postgres: crate::postgres::PostgresAccess,
 
+    /// Last statistics collected for **this** database.
+    ///
+    /// Per database rather than one shared cache, for the same reason the write
+    /// window is: the sections are scoped to a single connection — its server
+    /// version, its privileges, its tables — and a mount whose database is
+    /// unreachable must not blank the numbers of the ones that are up.
+    pub stats: crate::db_stats::DbStatsCache,
+
     /// Expiry (`unix_microseconds`) of this database's write-access window; `0`
     /// means disabled. Stored as the deadline rather than a flag plus a timer,
     /// so it expires lazily on read and needs no background task.
@@ -58,6 +66,7 @@ impl DbContext {
             path: Arc::new(mount.path),
             description: mount.description,
             postgres: crate::postgres::PostgresAccess::new(app_name, conn_settings).await,
+            stats: crate::db_stats::DbStatsCache::new(),
             mcp_writes_enabled_until: AtomicI64::new(0),
         }
     }

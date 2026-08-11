@@ -1,10 +1,17 @@
 use dioxus::prelude::*;
 
+use crate::AppRoute;
 use crate::components::atoms::{Icon, IconKind, StatePill, StateTone};
 use crate::storage;
 
 /// Same mark as the browser favicon — see `main.rs`.
 const LOGO: Asset = asset!("/public/favicon.svg");
+
+/// The pages, in the order they appear in the topbar.
+const NAV: [(&str, fn() -> AppRoute); 2] = [
+    ("Requests", || AppRoute::Home {}),
+    ("Statistics", || AppRoute::Stats {}),
+];
 
 #[component]
 pub fn Topbar(writes_enabled_count: usize, databases_count: usize) -> Element {
@@ -35,12 +42,35 @@ pub fn Topbar(writes_enabled_count: usize, databases_count: usize) -> Element {
 
     let theme_icon = if is_dark { IconKind::Sun } else { IconKind::Moon };
 
+    // `use_route` rather than a prop: the topbar already knows which page it is on,
+    // and threading the answer through every page would be one more thing to get
+    // wrong when a page is added.
+    let current = use_route::<AppRoute>();
+
+    let nav: Vec<Element> = NAV
+        .iter()
+        .map(|(label, route)| {
+            let route = route();
+            let is_active = route == current;
+
+            rsx! {
+                Link {
+                    key: "{label}",
+                    class: if is_active { "topbar__nav-link topbar__nav-link--active" } else { "topbar__nav-link" },
+                    to: route,
+                    "{label}"
+                }
+            }
+        })
+        .collect();
+
     rsx! {
         header { class: "topbar",
             div { class: "topbar__brand",
                 img { class: "topbar__logo", src: LOGO, alt: "" }
                 span { class: "topbar__brand-name", "Postgres MCP Server" }
             }
+            nav { class: "topbar__nav", {nav.into_iter()} }
             div { class: "topbar__actions",
                 StatePill { label: writes_label, tone: writes_tone }
                 button {

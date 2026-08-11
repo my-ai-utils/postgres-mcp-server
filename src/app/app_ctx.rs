@@ -21,6 +21,16 @@ pub struct AppContext {
     /// One log for all databases, so the UI can show a single chronological
     /// timeline; each entry carries the path it ran against.
     pub sql_log: crate::sql_log::SqlRequestsLog,
+
+    /// Three days of metrics history, shared by every database — one file and one
+    /// commit per tick rather than one per mount. Each row carries the mount path
+    /// it belongs to.
+    pub metrics: crate::db_stats::MetricsStore,
+
+    /// The last failure from a history write or retention sweep. Those run on a
+    /// timer with no request to fail, so without this a full disk would stop
+    /// recording while every live card kept updating.
+    pub metrics_write_error: crate::db_stats::LastError,
 }
 
 impl AppContext {
@@ -35,6 +45,11 @@ impl AppContext {
             app_states: Arc::new(AppStates::create_initialized()),
             databases,
             sql_log: crate::sql_log::SqlRequestsLog::new(),
+            // A history file that cannot be opened disables history and is
+            // reported, but never stops the boot: proxying SQL and gating writes do
+            // not depend on it.
+            metrics: crate::db_stats::MetricsStore::open().await,
+            metrics_write_error: crate::db_stats::LastError::new(),
         }
     }
 
