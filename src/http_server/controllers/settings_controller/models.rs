@@ -107,3 +107,35 @@ pub struct TrackIoTimingResultModel {
     // a transaction block" call for different fixes.
     pub error: Option<String>,
 }
+
+/// Body of `POST /api/Settings/PgStatStatements`.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, MyHttpObjectStructure)]
+pub struct SetupExtensionBody {
+    #[serde(rename = "path")]
+    pub path: String,
+    // "create" or "preload". Anything unrecognized means "create", so a typo installs
+    // the extension rather than rewriting a postmaster setting.
+    #[serde(rename = "action")]
+    pub action: String,
+}
+
+#[derive(MyHttpInput)]
+pub struct SetupExtensionInput {
+    #[http_body_raw(
+        description = "JSON body { path, action }. action is \"create\" (CREATE EXTENSION, immediate) or \"preload\" (append to shared_preload_libraries, needs a Postgres restart)."
+    )]
+    pub body: RawDataTyped<SetupExtensionBody>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+pub struct SetupExtensionResultModel {
+    pub done: bool,
+    // True when Postgres must be restarted before the change takes effect. A reload
+    // does not pick shared_preload_libraries up.
+    #[serde(rename = "restartRequired")]
+    pub restart_required: bool,
+    // What happened, in the operator's terms.
+    pub message: String,
+    // Postgres' own refusal, when it refused.
+    pub error: Option<String>,
+}

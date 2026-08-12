@@ -52,6 +52,9 @@ pub mod collector;
 mod disk_io;
 pub use disk_io::*;
 
+mod extension_setup;
+pub use extension_setup::*;
+
 mod health;
 pub use health::*;
 

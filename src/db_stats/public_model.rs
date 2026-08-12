@@ -58,6 +58,14 @@ pub struct ServerInfoModel {
     // Whether the server times its I/O. Off by default; without it every I/O timing
     // figure is null rather than zero.
     pub track_io_timing: Option<bool>,
+    // pg_stat_statements is in pg_available_extensions — the contrib package is
+    // installed, so the library is on disk. Setting shared_preload_libraries to a
+    // library that is NOT on disk stops Postgres from starting, so this gates the
+    // offer to do it.
+    pub pg_stat_statements_available: Option<bool>,
+    // Already in shared_preload_libraries: CREATE EXTENSION alone is enough, and no
+    // restart is needed.
+    pub pg_stat_statements_preloaded: Option<bool>,
 }
 
 impl ServerInfoModel {
@@ -75,6 +83,8 @@ impl ServerInfoModel {
             has_pg_stat_statements: data.map(|d| d.has_pg_stat_statements),
             max_connections: data.map(|d| d.max_connections as i64),
             track_io_timing: data.map(|d| d.track_io_timing),
+            pg_stat_statements_available: data.map(|d| d.pg_stat_statements_available),
+            pg_stat_statements_preloaded: data.map(|d| d.pg_stat_statements_preloaded),
         }
     }
 }

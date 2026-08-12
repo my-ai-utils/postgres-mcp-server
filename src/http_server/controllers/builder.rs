@@ -19,6 +19,10 @@ pub fn build(app: &Arc<AppContext>) -> ControllersMiddleware {
         super::settings_controller::SetTrackIoTimingAction::new(app.clone()),
     ));
 
+    result.register_post_action(Arc::new(
+        super::settings_controller::SetupExtensionAction::new(app.clone()),
+    ));
+
     result.register_get_action(Arc::new(super::requests_controller::GetRequestsAction::new(
         app.clone(),
     )));

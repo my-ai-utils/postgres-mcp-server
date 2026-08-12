@@ -56,6 +56,10 @@ pub struct StatsState {
     /// Window the minute series covers.
     minutes_from_ms: i64,
     minutes_to_ms: i64,
+    /// Mount whose extension install is in flight.
+    extension_busy: Option<String>,
+    /// What the last install attempt reported, verbatim.
+    extension_message: Option<String>,
     /// Mount whose track_io_timing change is in flight, so only that card's buttons
     /// go quiet.
     io_timing_busy: Option<String>,
@@ -582,12 +586,147 @@ fn LoadTiles(health: Health, activity: Activity) -> Element {
     }
 }
 
+/// Installs pg_stat_statements after asking. The confirmation spells out which of
+/// the two steps this is, because only one of them needs a restart.
+fn install_pg_stat_statements(mut cs: Signal<StatsState>, path: String, preload: bool) {
+    let question = if preload {
+        format!(
+            "Add pg_stat_statements to shared_preload_libraries on the server behind {}?\n\n\
+             The library is APPENDED to whatever is already listed, so other extensions \
+             keep working.\n\n\
+             This needs a full Postgres RESTART to take effect — a reload is not enough, \
+             and this tool cannot restart it for you.",
+            path
+        )
+    } else {
+        format!(
+            "Run CREATE EXTENSION IF NOT EXISTS pg_stat_statements on {}?\n\n\
+             The library is already preloaded, so this takes effect immediately and needs \
+             no restart. Requires privileges to create extensions.",
+            path
+        )
+    };
+
+    if !crate::storage::confirm(question.as_str()) {
+        return;
+    }
+
+    cs.write().extension_busy = Some(path.clone());
+
+    spawn(async move {
+        let action = if preload { "preload" } else { "create" };
+
+        let message = match crate::api::setup_pg_stat_statements(path.as_str(), action).await {
+            Ok(result) => {
+                let mut message = result.message;
+
+                if let Some(error) = result.error {
+                    message = format!("{} {}", message, error);
+                }
+
+                Some(message)
+            }
+            Err(err) => Some(err.to_string()),
+        };
+
+        {
+            let mut write = cs.write();
+            write.extension_busy = None;
+            write.extension_message = message;
+        }
+
+        // The badge and this card both read the collected capabilities, so the page
+        // only tells the truth again once the server has been re-read.
+        poll_once(cs).await;
+    });
+}
+
 #[component]
-fn LoadCard(load: Load) -> Element {
+fn LoadCard(cs: Signal<StatsState>, path: String, load: Load, server: ServerInfo) -> Element {
+    let busy = cs.read().extension_busy.as_deref() == Some(path.as_str());
+    let outcome = cs.read().extension_message.clone();
+
     let body = if !section::is_ready(&load.state) {
+        let available = server.pg_stat_statements_available.unwrap_or(false);
+        let preloaded = server.pg_stat_statements_preloaded.unwrap_or(false);
+        let installed = server.has_pg_stat_statements.unwrap_or(false);
+
         rsx! {
             div { class: "card__body",
                 SectionNotice { state: load.state.clone(), reason: load.reason.clone() }
+
+                if server.is_collected() && !available {
+                    p { class: "muted", style: "margin: 10px 0 0; font-size: 12.5px;",
+                        "It is not in "
+                        code { class: "mono", "pg_available_extensions" }
+                        " either, so the "
+                        code { class: "mono", "postgresql-contrib" }
+                        " package is not installed on the database host. That has to be "
+                        "installed first — pointing "
+                        code { class: "mono", "shared_preload_libraries" }
+                        " at a library that is not on disk stops Postgres from starting."
+                    }
+                } else if server.is_collected() {
+                    div { class: "banner banner--warn", style: "margin-top: 10px;",
+                        if preloaded && !installed {
+                            p { style: "margin: 0 0 8px;",
+                                "The library is already preloaded — one statement finishes it, "
+                                "no restart:"
+                            }
+                            pre { class: "banner__code mono",
+                                "CREATE EXTENSION pg_stat_statements;"
+                            }
+                            div { class: "banner__actions",
+                                button {
+                                    class: "btn btn--primary btn--sm",
+                                    disabled: busy,
+                                    onclick: {
+                                        let path = path.clone();
+                                        move |_| install_pg_stat_statements(cs, path.clone(), false)
+                                    },
+                                    if busy { "Working…" } else { "Install it" }
+                                }
+                            }
+                        } else {
+                            p { style: "margin: 0 0 8px;",
+                                "Two steps. The first needs a "
+                                b { "full Postgres restart" }
+                                " — it is a postmaster setting, and a reload does not pick it up:"
+                            }
+                            pre { class: "banner__code mono",
+                                "ALTER SYSTEM SET shared_preload_libraries = '…,pg_stat_statements';\n-- restart Postgres, then:\nCREATE EXTENSION pg_stat_statements;"
+                            }
+                            div { class: "banner__actions",
+                                button {
+                                    class: "btn btn--sm",
+                                    disabled: busy,
+                                    onclick: {
+                                        let path = path.clone();
+                                        move |_| install_pg_stat_statements(cs, path.clone(), true)
+                                    },
+                                    if busy { "Working…" } else { "Set the preload" }
+                                }
+                                button {
+                                    class: "btn btn--primary btn--sm",
+                                    disabled: busy,
+                                    onclick: {
+                                        let path = path.clone();
+                                        move |_| install_pg_stat_statements(cs, path.clone(), false)
+                                    },
+                                    "Create the extension"
+                                }
+                                span { class: "faint", style: "font-size: 11.5px;",
+                                    "The preload is appended to what is already there, so other "
+                                    "extensions keep working. Restart, then create."
+                                }
+                            }
+                        }
+
+                        if let Some(outcome) = outcome.clone() {
+                            p { class: "banner__failure", "{outcome}" }
+                        }
+                    }
+                }
             }
         }
     } else if load.items.is_empty() {
@@ -1318,7 +1457,12 @@ fn DatabaseSection(cs: Signal<StatsState>, db: DatabaseStats) -> Element {
                 from_unix_ms: cs.read().minutes_from_ms,
                 to_unix_ms: cs.read().minutes_to_ms,
             }
-            LoadCard { load: stats.load.clone() }
+            LoadCard {
+                cs,
+                path: db.path.clone(),
+                load: stats.load.clone(),
+                server: stats.server.clone(),
+            }
             DiskIoCard {
                 cs,
                 path: db.path.clone(),

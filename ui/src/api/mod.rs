@@ -29,7 +29,8 @@ use serde::de::DeserializeOwned;
 
 use crate::models::{
     LoadHistory, MinuteHistory, RequestError, ServerSettings, ServerStats, SetMcpWritesRequest,
-    SetTrackIoTimingRequest, SqlRequestModel, SqlRequestsResponse, TrackIoTimingResult,
+    SetTrackIoTimingRequest, SetupExtensionRequest, SetupExtensionResult, SqlRequestModel,
+    SqlRequestsResponse, TrackIoTimingResult,
 };
 
 fn is_success(status: u16) -> bool {
@@ -124,6 +125,26 @@ pub async fn set_track_io_timing(
     };
 
     let response = FlUrl::new("/api/Settings/TrackIoTiming")
+        .post(HttpRequestBody::as_json(&body))
+        .await;
+
+    handle_http_response(response).await
+}
+
+/// Installs `pg_stat_statements` on the server behind `path`.
+///
+/// `action` is `"create"` (immediate) or `"preload"` (needs a Postgres restart).
+/// A refusal arrives as `Ok(result)` with `done: false` and the reason.
+pub async fn setup_pg_stat_statements(
+    path: &str,
+    action: &str,
+) -> Result<SetupExtensionResult, RequestError> {
+    let body = SetupExtensionRequest {
+        path: path.to_string(),
+        action: action.to_string(),
+    };
+
+    let response = FlUrl::new("/api/Settings/PgStatStatements")
         .post(HttpRequestBody::as_json(&body))
         .await;
 

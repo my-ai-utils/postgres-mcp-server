@@ -199,6 +199,12 @@ pub struct ServerInfo {
     /// Off by default. Without it every I/O *timing* figure is `None` rather than
     /// zero, because Postgres reports a hard zero when nothing is being measured.
     pub track_io_timing: Option<bool>,
+    /// The contrib package is installed, so the library is on disk. Gates the offer
+    /// to touch `shared_preload_libraries`: naming a library that is not there stops
+    /// Postgres from starting.
+    pub pg_stat_statements_available: Option<bool>,
+    /// Already preloaded — `CREATE EXTENSION` alone finishes the job, no restart.
+    pub pg_stat_statements_preloaded: Option<bool>,
 }
 
 impl ServerInfo {
@@ -716,6 +722,25 @@ impl ServerStats {
             .cloned()
             .collect()
     }
+}
+
+/// Body of `POST /api/Settings/PgStatStatements`.
+#[derive(serde::Serialize)]
+pub struct SetupExtensionRequest {
+    pub path: String,
+    /// `"create"` or `"preload"`.
+    pub action: String,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupExtensionResult {
+    pub done: bool,
+    /// Postgres must be restarted before the change takes effect — a reload is not
+    /// enough for `shared_preload_libraries`.
+    pub restart_required: bool,
+    pub message: String,
+    pub error: Option<String>,
 }
 
 /// Body of `POST /api/Settings/TrackIoTiming`.

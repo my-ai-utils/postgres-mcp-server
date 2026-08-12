@@ -39,6 +39,15 @@ pub struct ServerCapabilities {
     /// are permanently zero — not "no I/O happened", but "nobody was counting" —
     /// which is exactly the kind of zero this server refuses to publish as a number.
     pub track_io_timing: bool,
+    /// `pg_stat_statements` is present in `pg_available_extensions` — the contrib
+    /// package is installed, so the library exists on disk and can be preloaded.
+    ///
+    /// The precondition for touching `shared_preload_libraries` at all: naming a
+    /// library that is not there stops Postgres from starting.
+    pub pg_stat_statements_available: bool,
+    /// Already in `shared_preload_libraries`, so `CREATE EXTENSION` alone finishes
+    /// the job and no restart is needed.
+    pub pg_stat_statements_preloaded: bool,
 }
 
 const SQL: &str = r#"
@@ -58,7 +67,11 @@ SELECT
     )                                                                        AS can_read_all_stats,
     EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')  AS has_pg_stat_statements,
     current_setting('max_connections')::int4                                  AS max_connections,
-    current_setting('track_io_timing') = 'on'                                 AS track_io_timing
+    current_setting('track_io_timing') = 'on'                                 AS track_io_timing,
+    EXISTS (
+        SELECT 1 FROM pg_available_extensions WHERE name = 'pg_stat_statements'
+    )                                                                         AS pgss_available,
+    current_setting('shared_preload_libraries') LIKE '%pg_stat_statements%'   AS pgss_preloaded
 "#;
 
 impl ServerCapabilities {
@@ -81,6 +94,8 @@ impl ServerCapabilities {
             has_pg_stat_statements: opt_bool(row, "has_pg_stat_statements").unwrap_or_default(),
             max_connections: opt_i32(row, "max_connections").unwrap_or_default(),
             track_io_timing: opt_bool(row, "track_io_timing").unwrap_or_default(),
+            pg_stat_statements_available: opt_bool(row, "pgss_available").unwrap_or_default(),
+            pg_stat_statements_preloaded: opt_bool(row, "pgss_preloaded").unwrap_or_default(),
         }
     }
 
