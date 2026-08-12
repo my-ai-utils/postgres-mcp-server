@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 use crate::db_stats::{
-    HistoryRow, LoadSample, LongestQuerySample, StatementLoadSample, TableSizeSample,
+    HistoryRow, LoadSample, LongestQuerySample, MinuteThroughputSample, StatementLoadSample,
+    TableSizeSample,
 };
 
 /// Sections of the history, mirroring the `db_stats` MCP tool's `section` argument
@@ -13,6 +14,7 @@ pub const SECTION_LOAD: &str = "load";
 pub const SECTION_TABLES: &str = "tables";
 pub const SECTION_STATEMENTS: &str = "statements";
 pub const SECTION_LONGEST: &str = "longest";
+pub const SECTION_MINUTES: &str = "minutes";
 
 /// Hard ceiling on the window. Retention is three days, so a longer request could
 /// only ever return the same rows; the cap keeps a hand-typed `hours=100000` from
@@ -38,7 +40,7 @@ pub struct HistoryInput {
 
     #[http_query(
         name = "section",
-        description = "Which series to return: \"load\" (the 5-second load samples), \"tables\" (hourly table sizes), \"statements\" (hourly statement costs) or \"longest\" (each hour's top-5 longest-running statements). Defaults to \"load\".",
+        description = "Which series to return: \"load\" (the 5-second load samples), \"minutes\" (per-minute calls, average time and longest query), \"tables\" (hourly table sizes), \"statements\" (hourly statement costs) or \"longest\" (each hour's top-5 longest-running statements). Defaults to \"load\".",
         default = "load"
     )]
     pub section: Option<String>,
@@ -239,7 +241,45 @@ impl LongestQuerySnapshotModel {
     }
 }
 
-/// Exactly one of the four series is populated per request — the one named by
+/// One minute of traffic.
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
+pub struct MinutePointModel {
+    pub at: String,
+    // Nominally 60s. Reported because a tick that ran late makes "per minute" a lie
+    // the reader cannot otherwise see.
+    pub window_secs: f64,
+    // Statements completed in the window, across the whole database. Exact.
+    pub calls: Option<i64>,
+    pub calls_per_sec: Option<f64>,
+    pub avg_exec_ms: Option<f64>,
+    pub total_exec_ms: Option<f64>,
+    // Longest OBSERVED by the 5-second sampler — a floor, not a maximum.
+    pub longest_secs: Option<f64>,
+    pub longest_query: Option<String>,
+    // A new lifetime maximum set inside the window: exact when present.
+    pub slowest_finished_ms: Option<f64>,
+    pub slowest_finished_query: Option<String>,
+}
+
+impl MinutePointModel {
+    fn new(src: HistoryRow<MinuteThroughputSample>) -> Self {
+        Self {
+            at: src.at.to_rfc3339(),
+            window_secs: src.value.window_secs,
+            calls: src.value.calls,
+            calls_per_sec: src.value.calls_per_sec,
+            avg_exec_ms: src.value.avg_exec_ms,
+            total_exec_ms: src.value.total_exec_ms,
+            longest_secs: src.value.longest_secs,
+            longest_query: src.value.longest_query,
+            slowest_finished_ms: src.value.slowest_finished_ms,
+            slowest_finished_query: src.value.slowest_finished_query,
+        }
+    }
+}
+
+/// Exactly one of the series is populated per request — the one named by
 /// `section`. They are separate fields rather than one polymorphic list so the
 /// shape is statically known to both swagger and the UI mirror.
 #[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
@@ -256,6 +296,7 @@ pub struct HistoryModel {
     pub tables: Vec<TableSizeSnapshotModel>,
     pub statements: Vec<StatementSnapshotModel>,
     pub longest: Vec<LongestQuerySnapshotModel>,
+    pub minutes: Vec<MinutePointModel>,
 }
 
 impl HistoryModel {
@@ -276,6 +317,7 @@ impl HistoryModel {
             tables: Vec::new(),
             statements: Vec::new(),
             longest: Vec::new(),
+            minutes: Vec::new(),
         }
     }
 
@@ -294,6 +336,11 @@ impl HistoryModel {
             .into_iter()
             .map(StatementSnapshotModel::new)
             .collect();
+        self
+    }
+
+    pub fn with_minutes(mut self, rows: Vec<HistoryRow<MinuteThroughputSample>>) -> Self {
+        self.minutes = rows.into_iter().map(MinutePointModel::new).collect();
         self
     }
 

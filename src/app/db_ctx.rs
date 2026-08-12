@@ -58,8 +58,13 @@ pub struct DbContext {
 
     /// The longest-running statements seen on this database since the last hourly
     /// flush. Filled from the 5-second ticks, because `pg_stat_activity` keeps no
-    /// history of its own — see [`crate::db_stats::LongestSeenInHour`].
-    pub longest_seen: crate::db_stats::LongestSeenInHour,
+    /// history of its own — see [`crate::db_stats::LongestSeenWindow`].
+    pub longest_seen: crate::db_stats::LongestSeenWindow,
+
+    /// The same sightings over a one-minute window, drained by the slow tick to build
+    /// the per-minute throughput row. Separate from `longest_seen` only because the
+    /// two are flushed on different clocks.
+    pub longest_seen_minute: crate::db_stats::LongestSeenWindow,
 
     /// Expiry (`unix_microseconds`) of this database's write-access window; `0`
     /// means disabled. Stored as the deadline rather than a flag plus a timer,
@@ -86,7 +91,8 @@ impl DbContext {
             server,
             postgres: crate::postgres::PostgresAccess::new(app_name, conn_settings).await,
             stats: crate::db_stats::DbStatsCache::new(),
-            longest_seen: crate::db_stats::LongestSeenInHour::new(),
+            longest_seen: crate::db_stats::LongestSeenWindow::new(),
+            longest_seen_minute: crate::db_stats::LongestSeenWindow::new(),
             mcp_writes_enabled_until: AtomicI64::new(0),
         }
     }

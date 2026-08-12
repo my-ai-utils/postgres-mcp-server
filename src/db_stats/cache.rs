@@ -22,6 +22,8 @@ pub struct SlowTick {
     pub tables: Section<TablesStats>,
     pub statements: Section<(TopStatements, StatementsSnapshot)>,
     pub disk_io: Section<(DiskIo, DiskIoSnapshot)>,
+    /// `None` on the first tick, when there is no previous sample to diff against.
+    pub throughput: Option<super::MinuteThroughput>,
 }
 
 /// One database's published statistics, plus the raw previous samples the rate
@@ -155,6 +157,12 @@ impl DbStatsCache {
         snapshot.tables = tick.tables;
         snapshot.statements = statements;
         snapshot.disk_io = disk_io;
+
+        // Kept from the previous minute when this tick produced none, so the card does
+        // not blank between ticks; the timestamp beside it says how old it is.
+        if tick.throughput.is_some() {
+            snapshot.throughput = tick.throughput;
+        }
 
         state.snapshot = Arc::new(snapshot);
     }

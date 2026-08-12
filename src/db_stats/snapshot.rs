@@ -1,7 +1,8 @@
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 use super::{
-    ActivityStats, DbHealth, DiskIo, Section, ServerCapabilities, TablesStats, TopStatements,
+    ActivityStats, DbHealth, DiskIo, MinuteThroughput, Section, ServerCapabilities, TablesStats,
+    TopStatements,
 };
 
 /// Everything the collector knows about one database, as of the last tick.
@@ -30,4 +31,6 @@ pub struct DbStatsSnapshot {
     pub tables: Section<TablesStats>,
     pub statements: Section<TopStatements>,
     pub disk_io: Section<DiskIo>,
+    /// The last completed minute of traffic. `None` until two slow ticks have run.
+    pub throughput: Option<MinuteThroughput>,
 }

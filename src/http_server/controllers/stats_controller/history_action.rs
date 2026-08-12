@@ -6,7 +6,8 @@ use my_http_server::{HttpContext, HttpFailResult, HttpOkResult, HttpOutput};
 use crate::app::AppContext;
 
 use super::history_models::{
-    HistoryInput, HistoryModel, SECTION_LONGEST, SECTION_STATEMENTS, SECTION_TABLES,
+    HistoryInput, HistoryModel, SECTION_LONGEST, SECTION_MINUTES, SECTION_STATEMENTS,
+    SECTION_TABLES,
 };
 
 #[http_route(
@@ -74,6 +75,15 @@ async fn handle_request(
             .await
         {
             Ok(rows) => model.with_statements(rows),
+            Err(err) => HistoryModel::empty(path, section.as_str(), from, to, Some(err)),
+        },
+        SECTION_MINUTES => match action
+            .app
+            .metrics
+            .read_minutes(from, to, path.as_str())
+            .await
+        {
+            Ok(rows) => model.with_minutes(rows),
             Err(err) => HistoryModel::empty(path, section.as_str(), from, to, Some(err)),
         },
         SECTION_LONGEST => match action

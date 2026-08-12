@@ -126,7 +126,29 @@ impl MyTimerTick for SlowStatsTimer {
             running.spawn(collect_slow(db.clone()));
         }
 
-        while running.join_next().await.is_some() {}
+        let mut minutes = Vec::with_capacity(self.app.databases.len());
+
+        while let Some(finished) = running.join_next().await {
+            // A panic in one database's collection must not cost the others their
+            // minute; JoinSet reports it as an Err here.
+            if let Ok(Some(minute)) = finished {
+                minutes.push(minute);
+            }
+        }
+
+        if !minutes.is_empty() {
+            // The slow tick *is* the minute, so the row is written here rather than on
+            // the hourly timer — per-minute resolution is the whole point of it.
+            let written = self
+                .app
+                .metrics
+                .write_minutes(DateTimeAsMicroseconds::now(), minutes)
+                .await;
+
+            if let Some(err) = written.err() {
+                self.app.metrics_write_error.set(Some(err));
+            }
+        }
 
         RepeatTimerIteration::WithInterval
     }
@@ -284,7 +306,7 @@ async fn collect_fast(db: Arc<DbContext>) -> Option<(String, LoadSample)> {
         .map(|sample| (db.path.as_str().to_string(), sample))
 }
 
-async fn collect_slow(db: Arc<DbContext>) {
+async fn collect_slow(db: Arc<DbContext>) -> Option<(String, super::MinuteThroughput)> {
     let capabilities = super::collect_capabilities(&db.postgres, QUERY_TIMEOUT).await;
 
     let capabilities = match capabilities {
@@ -295,8 +317,9 @@ async fn collect_slow(db: Arc<DbContext>) {
                 tables: Section::Unavailable(UNREACHABLE.to_string()),
                 statements: Section::Unavailable(UNREACHABLE.to_string()),
                 disk_io: Section::Unavailable(UNREACHABLE.to_string()),
+                throughput: None,
             });
-            return;
+            return None;
         }
     };
 
@@ -312,6 +335,25 @@ async fn collect_slow(db: Arc<DbContext>) {
     )
     .await;
 
+    // The minute's throughput is assembled here rather than inside either source,
+    // because it needs both: the counts and the average come from the extension's
+    // deltas, while the longest comes from the 5-second sampler — see
+    // `super::throughput`. Draining the sampler starts the next minute, so it happens
+    // exactly once per slow tick whatever the statements query did.
+    let longest_this_minute = db.longest_seen_minute.take_top();
+
+    let throughput = statements.as_ref().ok().map(|(_, _, totals)| {
+        super::MinuteThroughput::new(
+            totals.window_secs.unwrap_or_default(),
+            totals.calls,
+            totals.total_exec_ms,
+            longest_this_minute.first(),
+            totals.record.clone(),
+        )
+    });
+
+    let statements = statements.map(|(top, snapshot, _)| (top, snapshot));
+
     let disk_io = super::collect_disk_io(
         &db.postgres,
         &capabilities,
@@ -325,7 +367,12 @@ async fn collect_slow(db: Arc<DbContext>) {
         tables: Section::from_result(tables),
         statements: Section::from_result(statements),
         disk_io: Section::from_result(disk_io),
+        throughput: throughput.clone(),
     });
+
+    // Handed back rather than written here: the store lives on the AppContext, and
+    // one commit for every database beats one per mount — see `MetricsStore`.
+    throughput.map(|throughput| (db.path.as_str().to_string(), throughput))
 }
 
 /// Starts the three collection timers.

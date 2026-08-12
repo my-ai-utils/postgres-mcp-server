@@ -6,7 +6,7 @@ use crate::components::atoms::{StatePill, StateTone};
 use crate::components::{LoadChartPoint, LoadCharts, LoadSeries, Topbar};
 use crate::models::{
     Activity, DatabaseStats, DiskIo, Health, HistoryInfo, Load, ServerInfo, ServerRef,
-    ServerSettings, ServerStats, Tables, WriteIo, fmt, section,
+    ServerSettings, ServerStats, Tables, Throughput, WriteIo, fmt, section,
 };
 
 /// Slower than the requests page's 1s: nothing here moves faster than the
@@ -1012,6 +1012,109 @@ fn WriteIoRow(writes: WriteIo) -> Element {
     }
 }
 
+/// The last minute: how many statements ran, how long they took on average, and the
+/// longest one.
+#[component]
+fn ThroughputCard(throughput: Option<Throughput>) -> Element {
+    let Some(throughput) = throughput else {
+        return rsx! {
+            div { class: "card",
+                div { class: "card__header",
+                    span { class: "card__title", "Throughput" }
+                }
+                div { class: "card__body",
+                    p { class: "muted", style: "margin: 0; font-size: 12.5px;",
+                        "Not measured yet — a minute needs two readings, so the first figure "
+                        "appears about two minutes after start-up. Needs pg_stat_statements."
+                    }
+                }
+            }
+        };
+    };
+
+    rsx! {
+        div { class: "card",
+            div { class: "card__header",
+                span { class: "card__title", "Throughput" }
+                span { class: "card__subtitle", "{throughput.window_label()}" }
+            }
+            div { class: "card__body",
+                div { class: "tiles",
+                    StatTile {
+                        label: "Queries".to_string(),
+                        value: fmt::int(throughput.calls),
+                        hint: match throughput.calls_per_sec {
+                            Some(rate) => format!("{:.1}/s", rate),
+                            None => fmt::NONE.to_string(),
+                        },
+                        tone: StateTone::Neutral,
+                        title: Some(
+                            "Statements that completed in the window, across the whole database — not just the ones this server's agent ran. Counted by pg_stat_statements, so exact."
+                                .to_string(),
+                        ),
+                    }
+                    StatTile {
+                        label: "Average time".to_string(),
+                        value: fmt::millis(throughput.avg_exec_ms),
+                        hint: "per query".to_string(),
+                        tone: match throughput.avg_exec_ms {
+                            Some(ms) if ms >= 100.0 => StateTone::Warn,
+                            Some(_) => StateTone::Ok,
+                            None => StateTone::Neutral,
+                        },
+                        title: Some(
+                            "Total execution time in the window divided by the number of statements. Exact for the window."
+                                .to_string(),
+                        ),
+                    }
+                    StatTile {
+                        label: "Longest seen".to_string(),
+                        value: fmt::seconds(throughput.longest_secs),
+                        hint: "sampled".to_string(),
+                        tone: match throughput.longest_secs {
+                            Some(secs) if secs >= 60.0 => StateTone::Bad,
+                            Some(secs) if secs >= 5.0 => StateTone::Warn,
+                            Some(_) => StateTone::Ok,
+                            None => StateTone::Neutral,
+                        },
+                        title: Some(
+                            "Longest execution the 5-second sampler actually saw. This is a floor, not a maximum: a statement that starts and finishes between two samples is never observed — but the ones that get missed are the fast ones."
+                                .to_string(),
+                        ),
+                    }
+                    StatTile {
+                        label: "Total time".to_string(),
+                        value: fmt::millis(throughput.total_exec_ms),
+                        hint: "all queries".to_string(),
+                        tone: StateTone::Neutral,
+                        title: Some(
+                            "Execution time of every statement in the window added together. What the average is derived from."
+                                .to_string(),
+                        ),
+                    }
+                }
+
+                if let Some(query) = throughput.longest_query.clone() {
+                    p { class: "throughput__query",
+                        span { class: "throughput__query-label", "Longest:" }
+                        span { class: "mono", title: "{query}", "{query}" }
+                    }
+                }
+
+                if let Some(ms) = throughput.slowest_finished_ms {
+                    p { class: "throughput__record",
+                        "New slowest execution on record this window: "
+                        b { class: "mono", "{fmt::millis(Some(ms))}" }
+                        if let Some(query) = throughput.slowest_finished_query.clone() {
+                            span { class: "mono", title: "{query}", " — {query}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn LongestQueriesCard(activity: Activity) -> Element {
     if !section::is_ready(&activity.state) {
@@ -1125,6 +1228,7 @@ fn DatabaseSection(cs: Signal<StatsState>, db: DatabaseStats) -> Element {
                 }
             }
 
+            ThroughputCard { throughput: stats.throughput.clone() }
             LoadCard { load: stats.load.clone() }
             DiskIoCard {
                 cs,

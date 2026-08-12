@@ -64,6 +64,7 @@ const LOAD: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("load_sam
 const TABLE_SIZES: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("table_samples");
 const STATEMENTS: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("statement_samples");
 const LONGEST: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("longest_samples");
+const MINUTES: TableDefinition<(i64, &str), &[u8]> = TableDefinition::new("minute_samples");
 
 /// One 5-second sample of how hard the database is working.
 ///
@@ -239,6 +240,69 @@ impl LongestQuerySample {
     }
 }
 
+/// One minute of traffic, as history.
+///
+/// Written every slow tick rather than hourly: the whole point of the row is the
+/// per-minute resolution, and it is a handful of numbers plus two truncated
+/// statements — 4,320 rows per database over the three-day horizon.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MinuteThroughputSample {
+    pub window_secs: f64,
+    pub calls: Option<i64>,
+    pub calls_per_sec: Option<f64>,
+    pub avg_exec_ms: Option<f64>,
+    pub total_exec_ms: Option<f64>,
+    /// Observed by sampling — a floor. See [`super::throughput`].
+    pub longest_secs: Option<f64>,
+    pub longest_query: Option<String>,
+    pub slowest_finished_ms: Option<f64>,
+    pub slowest_finished_query: Option<String>,
+}
+
+impl MinuteThroughputSample {
+    /// `None` when the minute produced no figure at all — an empty row would pad the
+    /// series with points that mean nothing.
+    fn new(src: &super::MinuteThroughput) -> Option<Self> {
+        if src.calls.is_none() && src.longest_secs.is_none() {
+            return None;
+        }
+
+        Some(Self {
+            window_secs: src.window_secs,
+            calls: src.calls,
+            calls_per_sec: src.calls_per_sec,
+            avg_exec_ms: src.avg_exec_ms,
+            total_exec_ms: src.total_exec_ms,
+            longest_secs: src.longest_secs,
+            // Truncated: 4,320 rows per database, each potentially carrying a full
+            // statement, is the difference between a small file and a large one.
+            longest_query: src.longest_query.as_deref().map(truncate_query),
+            slowest_finished_ms: src.slowest_finished_ms,
+            slowest_finished_query: src.slowest_finished_query.as_deref().map(truncate_query),
+        })
+    }
+}
+
+/// How much of a statement a per-minute row keeps. Enough to recognise the query,
+/// not enough to make the history file grow with it.
+const MAX_STORED_QUERY: usize = 512;
+
+fn truncate_query(query: &str) -> String {
+    if query.len() <= MAX_STORED_QUERY {
+        return query.to_string();
+    }
+
+    // Cut on a char boundary — SQL can hold any UTF-8.
+    let cut = query
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= MAX_STORED_QUERY)
+        .last()
+        .unwrap_or(0);
+
+    format!("{}…", &query[..cut])
+}
+
 /// The last error a background writer hit, if any.
 ///
 /// History writing happens on a timer with no request to fail, so an error has
@@ -274,11 +338,12 @@ pub struct GarbageCollected {
     pub table_sizes: usize,
     pub statements: usize,
     pub longest: usize,
+    pub minutes: usize,
 }
 
 impl GarbageCollected {
     pub fn total(&self) -> usize {
-        self.load + self.table_sizes + self.statements + self.longest
+        self.load + self.table_sizes + self.statements + self.longest + self.minutes
     }
 }
 
@@ -468,6 +533,36 @@ impl MetricsStore {
         self.read(STATEMENTS, from, to, db_path).await
     }
 
+    /// One row per minute per database — every database in one commit, like the
+    /// load samples.
+    pub async fn write_minutes(
+        &self,
+        at: DateTimeAsMicroseconds,
+        throughput: Vec<(String, super::MinuteThroughput)>,
+    ) -> Result<(), String> {
+        let rows: Vec<(String, MinuteThroughputSample)> = throughput
+            .into_iter()
+            .filter_map(|(db_path, throughput)| {
+                MinuteThroughputSample::new(&throughput).map(|sample| (db_path, sample))
+            })
+            .collect();
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        self.write(MINUTES, at, encode_rows(rows)?).await
+    }
+
+    pub async fn read_minutes(
+        &self,
+        from: DateTimeAsMicroseconds,
+        to: DateTimeAsMicroseconds,
+        db_path: &str,
+    ) -> Result<Vec<HistoryRow<MinuteThroughputSample>>, String> {
+        self.read(MINUTES, from, to, db_path).await
+    }
+
     /// Each row is one hour's top-5 longest-running statements, longest first.
     pub async fn read_longest(
         &self,
@@ -506,6 +601,7 @@ impl MetricsStore {
                     table_sizes: delete_older_than(&write, TABLE_SIZES, cutoff)?,
                     statements: delete_older_than(&write, STATEMENTS, cutoff)?,
                     longest: delete_older_than(&write, LONGEST, cutoff)?,
+                    minutes: delete_older_than(&write, MINUTES, cutoff)?,
                 }
             };
 
@@ -619,6 +715,7 @@ fn open_and_init(path: &str) -> Result<Database, String> {
         write.open_table(TABLE_SIZES).map_err(to_string)?;
         write.open_table(STATEMENTS).map_err(to_string)?;
         write.open_table(LONGEST).map_err(to_string)?;
+        write.open_table(MINUTES).map_err(to_string)?;
     }
 
     write.commit().map_err(to_string)?;

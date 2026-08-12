@@ -480,6 +480,48 @@ impl DiskIoModel {
     }
 }
 
+/// One minute of traffic: how many statements ran, how long they took on average,
+/// and the longest one.
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
+pub struct ThroughputModel {
+    // The window these cover. Nominally 60s; reported because a tick that ran late
+    // makes "per minute" a lie the reader cannot otherwise see.
+    pub window_secs: f64,
+    // Statements that completed in the window, across the WHOLE database — not just
+    // the ones this server's agent ran. From pg_stat_statements, so exact.
+    pub calls: Option<i64>,
+    pub calls_per_sec: Option<f64>,
+    // Total execution time over calls. Exact for the window.
+    pub avg_exec_ms: Option<f64>,
+    pub total_exec_ms: Option<f64>,
+    // Longest execution OBSERVED by the 5-second sampler. A floor, not a maximum: a
+    // statement that starts and finishes between two samples is never seen. The
+    // misses are the fast ones.
+    pub longest_secs: Option<f64>,
+    pub longest_query: Option<String>,
+    // A new lifetime maximum set inside the window — exact when present, absent when
+    // no record was broken. Never a guess.
+    pub slowest_finished_ms: Option<f64>,
+    pub slowest_finished_query: Option<String>,
+}
+
+impl ThroughputModel {
+    fn new(src: &super::MinuteThroughput) -> Self {
+        Self {
+            window_secs: src.window_secs,
+            calls: src.calls,
+            calls_per_sec: src.calls_per_sec,
+            avg_exec_ms: src.avg_exec_ms,
+            total_exec_ms: src.total_exec_ms,
+            longest_secs: src.longest_secs,
+            longest_query: src.longest_query.clone(),
+            slowest_finished_ms: src.slowest_finished_ms,
+            slowest_finished_query: src.slowest_finished_query.clone(),
+        }
+    }
+}
+
 /// One database's statistics, with no mention of which mount it came from.
 ///
 /// That omission is the reason this type exists separately from
@@ -502,6 +544,9 @@ pub struct DbStatsModel {
     pub load: LoadModel,
     pub tables: TablesModel,
     pub disk_io: DiskIoModel,
+    // The last completed minute. null until two slow ticks have run — a minute needs
+    // two readings to exist at all.
+    pub throughput: Option<ThroughputModel>,
 }
 
 impl DbStatsModel {
@@ -516,6 +561,7 @@ impl DbStatsModel {
             load: LoadModel::new(&src.statements),
             tables: TablesModel::new(&src.tables),
             disk_io: DiskIoModel::new(&src.disk_io),
+            throughput: src.throughput.as_ref().map(ThroughputModel::new),
         }
     }
 }

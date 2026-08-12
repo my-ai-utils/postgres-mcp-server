@@ -442,6 +442,42 @@
     color: var(--text-muted);
 }
 
+/* The statement behind the "longest seen" tile. Truncated rather than wrapped: the
+   number is the point, the text is context. */
+.throughput__query {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 10px 0 0;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    min-width: 0;
+}
+
+.throughput__query .mono {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.throughput__query-label {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--text-faint);
+}
+
+/* Only rendered when a lifetime maximum actually moved — an exact figure, unlike
+   the sampled one above it. */
+.throughput__record {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--warn);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* --- Banners: something the operator has to act on --- */
 .banner {
     padding: 9px 12px;

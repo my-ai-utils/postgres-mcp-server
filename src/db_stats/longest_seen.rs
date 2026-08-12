@@ -1,4 +1,4 @@
-//! The longest-running statements **observed during an hour**.
+//! The longest-running statements **observed during a window**.
 //!
 //! `pg_stat_activity` is a point-in-time view: it shows what is executing right
 //! now and keeps no history. Reading it once an hour would therefore record only
@@ -6,9 +6,21 @@
 //! in between — which is exactly the opposite of what "top 5 longest per hour" is
 //! for.
 //!
-//! So the hour is assembled from the 5-second ticks the collector already makes.
-//! Each tick contributes what it saw; this keeps the worst of them and the hourly
-//! timer flushes the top 5 to history and starts a new hour.
+//! So the window is assembled from the 5-second ticks the collector already makes.
+//! Each tick contributes what it saw; this keeps the worst of them, and whichever
+//! timer owns the window drains it and starts the next one.
+//!
+//! Two instances exist per database, over different windows and answering different
+//! questions: the hourly one keeps a top 5 for the history, and the per-minute one
+//! feeds the throughput row. They observe the same ticks; only the flush differs.
+//!
+//! # What sampling cannot see
+//!
+//! A statement that starts and finishes between two 5-second ticks is never
+//! observed. That is acceptable precisely because of what this measures: the misses
+//! are the *fast* ones, and anything running long enough to matter is running long
+//! enough to be sampled. It does mean "longest seen" is a floor, not a maximum, and
+//! every consumer says so.
 
 use std::collections::HashMap;
 
@@ -42,7 +54,7 @@ pub struct LongestSeen {
 }
 
 /// Per-database accumulator for the current hour.
-pub struct LongestSeenInHour {
+pub struct LongestSeenWindow {
     /// Keyed by execution, so one statement seen by twelve consecutive ticks is one
     /// entry that grows, not twelve entries at increasing durations.
     ///
@@ -52,7 +64,7 @@ pub struct LongestSeenInHour {
 }
 
 /// `(pid, query_start)` for statements that report both, and a synthetic
-/// per-sighting key for the ones that do not — see [`LongestSeenInHour::observe`].
+/// per-sighting key for the ones that do not — see [`LongestSeenWindow::observe`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ExecutionKey {
     Execution(i32, String),
@@ -61,7 +73,7 @@ enum ExecutionKey {
     Anonymous(String, i64),
 }
 
-impl LongestSeenInHour {
+impl LongestSeenWindow {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(HashMap::new()),
@@ -165,7 +177,7 @@ mod tests {
 
     #[test]
     fn one_execution_seen_by_many_ticks_is_one_entry_at_its_longest() {
-        let hour = LongestSeenInHour::new();
+        let hour = LongestSeenWindow::new();
 
         // The same statement, observed by three consecutive ticks as it runs.
         for secs in [5.0, 10.0, 17.5] {
@@ -180,7 +192,7 @@ mod tests {
 
     #[test]
     fn the_same_pid_running_a_new_statement_is_a_new_execution() {
-        let hour = LongestSeenInHour::new();
+        let hour = LongestSeenWindow::new();
 
         // Postgres reuses the backend, so pid alone would merge these two.
         hour.observe(&[seen(42, "2026-08-11T10:00:00+00:00", 30.0, "SELECT a")]);
@@ -195,7 +207,7 @@ mod tests {
 
     #[test]
     fn top_is_longest_first_and_capped() {
-        let hour = LongestSeenInHour::new();
+        let hour = LongestSeenWindow::new();
 
         for i in 0..12 {
             hour.observe(&[seen(
@@ -215,7 +227,7 @@ mod tests {
 
     #[test]
     fn taking_the_top_starts_a_fresh_hour() {
-        let hour = LongestSeenInHour::new();
+        let hour = LongestSeenWindow::new();
 
         hour.observe(&[seen(1, "2026-08-11T10:00:00+00:00", 900.0, "SELECT slow")]);
         assert_eq!(hour.take_top().len(), 1);
@@ -231,7 +243,7 @@ mod tests {
 
     #[test]
     fn a_sighting_without_a_duration_is_ignored() {
-        let hour = LongestSeenInHour::new();
+        let hour = LongestSeenWindow::new();
 
         let mut no_duration = seen(1, "2026-08-11T10:00:00+00:00", 0.0, "SELECT 1");
         no_duration.running_secs = None;
@@ -243,7 +255,7 @@ mod tests {
 
     #[test]
     fn the_wait_state_follows_the_longest_sighting() {
-        let hour = LongestSeenInHour::new();
+        let hour = LongestSeenWindow::new();
 
         let mut running = seen(7, "2026-08-11T10:00:00+00:00", 3.0, "UPDATE t");
         hour.observe(&[running.clone()]);
@@ -260,7 +272,7 @@ mod tests {
 
     #[test]
     fn tracking_is_bounded_but_keeps_the_longest() {
-        let hour = LongestSeenInHour::new();
+        let hour = LongestSeenWindow::new();
 
         for i in 0..(MAX_TRACKED as i32 + 200) {
             hour.observe(&[seen(

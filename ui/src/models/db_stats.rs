@@ -571,6 +571,45 @@ pub struct DbStats {
     pub load: Load,
     pub tables: Tables,
     pub disk_io: DiskIo,
+    /// The last completed minute. `None` until two slow ticks have run — a minute
+    /// needs two readings to exist at all.
+    pub throughput: Option<Throughput>,
+}
+
+/// One minute of traffic across the whole database.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Throughput {
+    pub window_secs: f64,
+    /// Statements that completed in the window — every one the database ran, not
+    /// just the agent's. Exact, from `pg_stat_statements`.
+    pub calls: Option<i64>,
+    pub calls_per_sec: Option<f64>,
+    pub avg_exec_ms: Option<f64>,
+    pub total_exec_ms: Option<f64>,
+    /// Longest execution the 5-second sampler *saw*. A floor: anything that starts
+    /// and finishes between two samples is invisible.
+    pub longest_secs: Option<f64>,
+    pub longest_query: Option<String>,
+    /// A new lifetime maximum set inside the window — exact when present.
+    pub slowest_finished_ms: Option<f64>,
+    pub slowest_finished_query: Option<String>,
+}
+
+impl Throughput {
+    /// A tick that ran late makes "per minute" misleading; the card then leads with
+    /// the rate instead of the raw count.
+    pub fn window_is_about_a_minute(&self) -> bool {
+        (45.0..=90.0).contains(&self.window_secs)
+    }
+
+    pub fn window_label(&self) -> String {
+        if self.window_is_about_a_minute() {
+            "last minute".to_string()
+        } else {
+            format!("last {:.0}s", self.window_secs)
+        }
+    }
 }
 
 /// Which Postgres server a database lives on, derived by the server from the
@@ -699,4 +738,49 @@ pub struct TrackIoTimingResult {
     /// Postgres' own message. "must be superuser" and "cannot run inside a
     /// transaction block" need different fixes, so it is shown verbatim.
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn throughput(window_secs: f64) -> Throughput {
+        Throughput {
+            window_secs,
+            calls: None,
+            calls_per_sec: None,
+            avg_exec_ms: None,
+            total_exec_ms: None,
+            longest_secs: None,
+            longest_query: None,
+            slowest_finished_ms: None,
+            slowest_finished_query: None,
+        }
+    }
+
+    #[test]
+    fn a_tick_that_ran_late_is_not_labelled_as_a_minute() {
+        // Calling a 4-minute window "last minute" would misstate every figure in the
+        // card by a factor of four.
+        assert_eq!(throughput(60.0).window_label(), "last minute");
+        assert_eq!(throughput(62.5).window_label(), "last minute");
+        assert_eq!(throughput(240.0).window_label(), "last 240s");
+    }
+
+    #[test]
+    fn bytes_are_rendered_the_way_postgres_renders_them() {
+        assert_eq!(fmt::bytes(Some(512)), "512 B");
+        assert_eq!(fmt::bytes(Some(2 * 1024 * 1024)), "2.0 MB");
+        assert_eq!(fmt::bytes(Some(2_147_483_648)), "2.0 GB");
+        // A value the database could not report is never a zero.
+        assert_eq!(fmt::bytes(None), fmt::NONE);
+    }
+
+    #[test]
+    fn a_missing_number_is_never_shown_as_zero() {
+        assert_eq!(fmt::int(None), fmt::NONE);
+        assert_eq!(fmt::ratio(None), fmt::NONE);
+        assert_eq!(fmt::millis(None), fmt::NONE);
+        assert_eq!(fmt::seconds(None), fmt::NONE);
+    }
 }

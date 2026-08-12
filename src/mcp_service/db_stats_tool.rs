@@ -15,11 +15,12 @@ const SECTION_LOAD: &str = "load";
 const SECTION_ACTIVITY: &str = "activity";
 const SECTION_HEALTH: &str = "health";
 const SECTION_IO: &str = "io";
+const SECTION_MINUTES: &str = "minutes";
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct DbStatsToolCallRequest {
     #[property(
-        description: "Which section to return. One of: 'tables' (largest tables with their size, row estimates, scan counts and last vacuum), 'load' (the statements consuming the most execution time), 'activity' (connections and the longest-running queries), 'health' (database-wide counters and throughput), 'io' (which tables are read off disk, plus WAL and checkpoint write volume), or 'all'. Defaults to 'all'."
+        description: "Which section to return. One of: 'tables' (largest tables with their size, row estimates, scan counts and last vacuum), 'load' (the statements consuming the most execution time), 'activity' (connections and the longest-running queries), 'health' (database-wide counters and throughput), 'io' (which tables are read off disk, plus WAL and checkpoint write volume), 'minutes' (the last minute's statement count, average execution time and longest query), or 'all'. Defaults to 'all'."
     )]
     pub section: String,
 }
@@ -89,6 +90,7 @@ fn narrow_to_section(json: serde_json::Value, section: &str) -> serde_json::Valu
         SECTION_ACTIVITY => "activity",
         SECTION_HEALTH => "health",
         SECTION_IO => "diskIo",
+        SECTION_MINUTES => "throughput",
         _ => return json,
     };
 
@@ -121,6 +123,7 @@ mod tests {
             "load": { "state": "ready" },
             "tables": { "state": "ready" },
             "diskIo": { "state": "ready" },
+            "throughput": { "calls": 1 },
         })
     }
 
@@ -169,6 +172,7 @@ mod tests {
             (SECTION_ACTIVITY, "activity"),
             (SECTION_HEALTH, "health"),
             (SECTION_IO, "diskIo"),
+            (SECTION_MINUTES, "throughput"),
         ] {
             let narrowed = narrow_to_section(sample_json(), section);
             let narrowed = narrowed.as_object().unwrap();
