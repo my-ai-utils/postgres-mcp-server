@@ -34,6 +34,42 @@ pub struct LoadPoint {
     pub backends_waiting: Option<i64>,
 }
 
+/// One recorded minute of traffic.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MinutePoint {
+    pub at: String,
+    /// The same instant as epoch milliseconds, so the chart needs no date library.
+    pub at_unix_ms: i64,
+    /// Nominally 60. A tick that ran late makes "per minute" a lie the reader cannot
+    /// otherwise see, so the window travels with the row.
+    pub window_secs: f64,
+    pub calls: Option<i64>,
+    pub calls_per_sec: Option<f64>,
+    pub avg_exec_ms: Option<f64>,
+    pub total_exec_ms: Option<f64>,
+    /// Sampled every 5 seconds, so a **floor** rather than a maximum.
+    pub longest_secs: Option<f64>,
+    pub longest_query: Option<String>,
+    pub slowest_finished_ms: Option<f64>,
+    pub slowest_finished_query: Option<String>,
+}
+
+/// `section=minutes`.
+///
+/// A separate type from [`LoadHistory`] rather than one struct with every array:
+/// each is fetched with its own `section`, and the strictness that matters is that
+/// every field named here must arrive.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MinuteHistory {
+    pub path: String,
+    pub section: String,
+    pub error: Option<String>,
+    /// Oldest first.
+    pub minutes: Vec<MinutePoint>,
+}
+
 /// The response.
 ///
 /// The `tables`, `statements` and `longest` arrays the server also sends are simply

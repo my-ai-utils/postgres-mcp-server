@@ -41,17 +41,9 @@
 
 use dioxus::prelude::*;
 
-/// Break the line when samples are further apart than this. The collector writes
-/// every 5 seconds, so this is "several ticks missing", not "one ran late".
-const GAP_MS: i64 = 30_000;
+use super::chart::{FAST_GAP_MS, clock, peak_with_headroom, sample_at, segments};
 
-/// How far the pointer may be from a sample and still read it.
-///
-/// Same window as [`GAP_MS`], and for the same reason: inside a recording gap there
-/// is no sample to report, so the readout says so instead of snapping to whatever
-/// lies minutes away on either side. Without this the crosshair would happily
-/// display a number from before an outage while hovering the middle of it.
-const SNAP_MS: i64 = GAP_MS;
+pub use super::chart::ChartPoint as LoadChartPoint;
 
 /// The shared y-axis never scales below this, so an idle hour is drawn as an idle
 /// hour. It is also the threshold worth seeing — one backend executing continuously.
@@ -61,12 +53,6 @@ const MIN_CEILING: f64 = 1.0;
 /// only the vertical proportion is real.
 const VIEW_W: f64 = 1000.0;
 const VIEW_H: f64 = 100.0;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LoadChartPoint {
-    pub at_unix_ms: i64,
-    pub value: f64,
-}
 
 /// One database's series, with the identity shown as the panel's title.
 #[derive(Clone, Debug, PartialEq)]
@@ -82,63 +68,16 @@ pub struct LoadSeries {
     pub duplicate_of: Option<String>,
 }
 
-/// Splits a series wherever a gap in recording makes a connecting line a lie.
-fn segments(points: &[LoadChartPoint]) -> Vec<Vec<&LoadChartPoint>> {
-    let mut result: Vec<Vec<&LoadChartPoint>> = Vec::new();
-    let mut current: Vec<&LoadChartPoint> = Vec::new();
-
-    for point in points {
-        if let Some(previous) = current.last() {
-            if point.at_unix_ms - previous.at_unix_ms > GAP_MS {
-                result.push(std::mem::take(&mut current));
-            }
-        }
-
-        current.push(point);
-    }
-
-    if !current.is_empty() {
-        result.push(current);
-    }
-
-    result
-}
-
 /// One ceiling for every panel, so their heights mean the same thing.
-pub fn shared_ceiling(series: &[LoadSeries]) -> f64 {
-    let peak = series
-        .iter()
-        .flat_map(|s| s.points.iter())
-        .map(|point| point.value)
-        .fold(0.0_f64, f64::max);
-
-    // Headroom so the tallest peak is not drawn touching the top edge.
-    (peak * 1.15).max(MIN_CEILING)
-}
-
-/// The sample nearest `at_unix_ms`, or `None` when the pointer is inside a gap —
-/// further than [`SNAP_MS`] from any sample this series actually has.
-fn sample_at(points: &[LoadChartPoint], at_unix_ms: i64) -> Option<&LoadChartPoint> {
-    points
-        .iter()
-        .min_by_key(|point| (point.at_unix_ms - at_unix_ms).abs())
-        .filter(|point| (point.at_unix_ms - at_unix_ms).abs() <= SNAP_MS)
-}
-
-/// `hh:mm:ss` (UTC) from epoch milliseconds.
 ///
-/// Hand-rolled to keep a date library out of the wasm bundle for one label row, and
-/// UTC on purpose: every other timestamp on this page comes from the server as UTC,
-/// and one row quietly in local time would not line up with them.
-fn clock(at_unix_ms: i64) -> String {
-    let seconds = at_unix_ms.div_euclid(1_000).rem_euclid(86_400);
+/// Shared here, unlike [`super::MinuteCharts`], because every panel shows the *same*
+/// measure for a different database — a shared axis is only honest between like
+/// things, and per-panel scaling would draw an idle database at the same height as a
+/// saturated one.
+pub fn shared_ceiling(series: &[LoadSeries]) -> f64 {
+    let all: Vec<LoadChartPoint> = series.iter().flat_map(|s| s.points.clone()).collect();
 
-    format!(
-        "{:02}:{:02}:{:02}",
-        seconds / 3_600,
-        (seconds % 3_600) / 60,
-        seconds % 60
-    )
+    peak_with_headroom(&all).unwrap_or(0.0).max(MIN_CEILING)
 }
 
 #[component]
@@ -172,7 +111,7 @@ fn LoadPanel(
 
     let mut marks: Vec<Element> = Vec::new();
 
-    for (index, segment) in segments(&series.points).iter().enumerate() {
+    for (index, segment) in segments(&series.points, FAST_GAP_MS).iter().enumerate() {
         // A lone sample has no line to draw; a dot keeps a single tick that survived
         // an outage visible instead of silently absent.
         if segment.len() == 1 {
@@ -220,7 +159,7 @@ fn LoadPanel(
     // What the crosshair is pointing at in *this* series. `None` while the pointer is
     // away, or over a stretch this database recorded nothing for.
     let hovered = hover.read().and_then(|at| {
-        sample_at(&series.points, at).map(|point| (point.at_unix_ms, point.value))
+        sample_at(&series.points, at, FAST_GAP_MS).map(|point| (point.at_unix_ms, point.value))
     });
 
     rsx! {
@@ -393,7 +332,7 @@ pub fn LoadCharts(
     let hovered_at = hover.read().and_then(|at| {
         series
             .iter()
-            .filter_map(|s| sample_at(&s.points, at))
+            .filter_map(|s| sample_at(&s.points, at, FAST_GAP_MS))
             .min_by_key(|point| (point.at_unix_ms - at).abs())
             .map(|point| point.at_unix_ms)
     });
@@ -429,6 +368,9 @@ pub fn LoadCharts(
 mod tests {
     use super::*;
 
+    // The gap, snapping and clock rules moved to `super::chart` with the functions
+    // that implement them; what is left here is the one rule specific to this chart.
+
     fn point(at_unix_ms: i64, value: f64) -> LoadChartPoint {
         LoadChartPoint { at_unix_ms, value }
     }
@@ -444,38 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn a_continuous_series_is_one_segment() {
-        let points: Vec<_> = (0..10).map(|i| point(i * 5_000, 0.5)).collect();
-
-        assert_eq!(segments(&points).len(), 1);
-    }
-
-    #[test]
-    fn a_recording_gap_breaks_the_line() {
-        // Five minutes of nothing: the database was unreachable. Joining across it
-        // would draw a low flat line over an outage.
-        let points = vec![
-            point(0, 0.5),
-            point(5_000, 0.6),
-            point(305_000, 0.4),
-            point(310_000, 0.5),
-        ];
-
-        let segments = segments(&points);
-
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].len(), 2);
-        assert_eq!(segments[1].len(), 2);
-    }
-
-    #[test]
-    fn one_late_tick_does_not_break_the_line() {
-        let points = vec![point(0, 0.5), point(10_000, 0.6), point(15_000, 0.7)];
-
-        assert_eq!(segments(&points).len(), 1);
-    }
-
-    #[test]
     fn an_idle_database_is_not_scaled_up_into_looking_busy() {
         let idle = vec![series((0..5).map(|i| point(i * 5_000, 0.004)).collect())];
 
@@ -484,7 +394,8 @@ mod tests {
 
     #[test]
     fn the_ceiling_is_shared_across_panels_so_they_stay_comparable() {
-        // A quiet database next to a busy one must not be drawn at the same height.
+        // A quiet database next to a busy one must not be drawn at the same height —
+        // every panel here measures the same thing, so one scale is the honest one.
         let panels = vec![
             series(vec![point(0, 0.01), point(5_000, 0.02)]),
             series(vec![point(0, 3.0), point(5_000, 2.0)]),
@@ -501,39 +412,5 @@ mod tests {
         let panels = vec![series(Vec::new()), series(vec![point(0, 2.0)])];
 
         assert!((shared_ceiling(&panels) - 2.3).abs() < 0.001);
-    }
-
-    #[test]
-    fn the_crosshair_snaps_to_the_nearest_sample() {
-        let points = vec![point(0, 0.1), point(5_000, 0.2), point(10_000, 0.3)];
-
-        // Just past the midpoint between the first two.
-        assert_eq!(sample_at(&points, 2_600).unwrap().value, 0.2);
-        // Exactly on one.
-        assert_eq!(sample_at(&points, 10_000).unwrap().value, 0.3);
-        // Slightly outside the series still reads its nearest end.
-        assert_eq!(sample_at(&points, -1_000).unwrap().value, 0.1);
-    }
-
-    #[test]
-    fn the_crosshair_reads_nothing_inside_a_recording_gap() {
-        // Ten minutes missing. Hovering the middle of it must not report the value
-        // from before the outage as though it were current.
-        let points = vec![point(0, 0.9), point(600_000, 0.4)];
-
-        assert!(sample_at(&points, 300_000).is_none());
-        // ...but close to a real sample it reads again.
-        assert_eq!(sample_at(&points, 10_000).unwrap().value, 0.9);
-    }
-
-    #[test]
-    fn a_series_with_no_points_reads_nothing() {
-        assert!(sample_at(&[], 1_000).is_none());
-    }
-
-    #[test]
-    fn the_clock_renders_utc_time_of_day() {
-        assert_eq!(clock(3_723_000), "01:02:03");
-        assert_eq!(clock(86_400_000 + 3_723_000), "01:02:03");
     }
 }

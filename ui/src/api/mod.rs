@@ -28,7 +28,7 @@ use flurl::{FlUrl, FlUrlError, FlUrlResponse};
 use serde::de::DeserializeOwned;
 
 use crate::models::{
-    LoadHistory, RequestError, ServerSettings, ServerStats, SetMcpWritesRequest,
+    LoadHistory, MinuteHistory, RequestError, ServerSettings, ServerStats, SetMcpWritesRequest,
     SetTrackIoTimingRequest, SqlRequestModel, SqlRequestsResponse, TrackIoTimingResult,
 };
 
@@ -141,6 +141,18 @@ pub async fn get_load_history(path: &str, hours: i64) -> Result<LoadHistory, Req
         .append_query_param("path", Some(path.to_string()))
         .append_query_param("hours", Some(hours.to_string()))
         .append_query_param("section", Some("load".to_string()))
+        .get()
+        .await;
+
+    handle_http_response(response).await
+}
+
+/// The recorded per-minute rows of one database, oldest first.
+pub async fn get_minute_history(path: &str, hours: i64) -> Result<MinuteHistory, RequestError> {
+    let response = FlUrl::new("/api/Stats/History")
+        .append_query_param("path", Some(path.to_string()))
+        .append_query_param("hours", Some(hours.to_string()))
+        .append_query_param("section", Some("minutes".to_string()))
         .get()
         .await;
 

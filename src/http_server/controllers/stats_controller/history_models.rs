@@ -246,6 +246,10 @@ impl LongestQuerySnapshotModel {
 #[serde(rename_all = "camelCase")]
 pub struct MinutePointModel {
     pub at: String,
+    // The same instant as epoch milliseconds — a chart has to do arithmetic on time,
+    // and parsing RFC 3339 in the wasm client would mean a date library for one
+    // subtraction.
+    pub at_unix_ms: i64,
     // Nominally 60s. Reported because a tick that ran late makes "per minute" a lie
     // the reader cannot otherwise see.
     pub window_secs: f64,
@@ -266,6 +270,7 @@ impl MinutePointModel {
     fn new(src: HistoryRow<MinuteThroughputSample>) -> Self {
         Self {
             at: src.at.to_rfc3339(),
+            at_unix_ms: src.at.unix_microseconds / 1_000,
             window_secs: src.value.window_secs,
             calls: src.value.calls,
             calls_per_sec: src.value.calls_per_sec,

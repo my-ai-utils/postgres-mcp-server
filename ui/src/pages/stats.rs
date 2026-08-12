@@ -3,7 +3,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 use crate::components::atoms::{StatePill, StateTone};
-use crate::components::{LoadChartPoint, LoadCharts, LoadSeries, Topbar};
+use crate::components::{
+    ChartPoint, LoadCharts, LoadSeries, MinuteCharts, MinuteSeries, MinuteUnit, Topbar,
+};
 use crate::models::{
     Activity, DatabaseStats, DiskIo, Health, HistoryInfo, Load, ServerInfo, ServerRef,
     ServerSettings, ServerStats, Tables, Throughput, WriteIo, fmt, section,
@@ -48,6 +50,12 @@ pub struct StatsState {
     /// data": the first fetch takes a moment, and an empty card claiming there is
     /// nothing recorded would be wrong for that moment.
     chart_note: String,
+    /// The per-minute series of each database, keyed by mount path. Fetched
+    /// alongside the load panels so both share one refresh clock.
+    minutes: Vec<(String, Vec<MinuteSeries>)>,
+    /// Window the minute series covers.
+    minutes_from_ms: i64,
+    minutes_to_ms: i64,
     /// Mount whose track_io_timing change is in flight, so only that card's buttons
     /// go quiet.
     io_timing_busy: Option<String>,
@@ -134,6 +142,8 @@ async fn refresh_chart(mut cs: Signal<StatsState>) {
     let databases = cs.peek().stats.databases_on(requested.as_str());
 
     let mut series: Vec<LoadSeries> = Vec::with_capacity(databases.len());
+    let mut minutes: Vec<(String, Vec<MinuteSeries>)> = Vec::with_capacity(databases.len());
+    let mut minutes_to_ms = 0_i64;
     let mut seen_databases: Vec<(String, String)> = Vec::new();
 
     for db in &databases {
@@ -152,14 +162,14 @@ async fn refresh_chart(mut cs: Signal<StatsState>) {
         let (points, note) = match crate::api::get_load_history(db.path.as_str(), CHART_HOURS).await
         {
             Ok(history) => {
-                let points: Vec<LoadChartPoint> = history
+                let points: Vec<ChartPoint> = history
                     .load
                     .iter()
                     // A sample with no busy figure — Postgres older than 14, or the
                     // first tick after a stats reset — is left out rather than
                     // plotted as zero, which would read as "idle".
                     .filter_map(|point| {
-                        point.busy_backends.map(|value| LoadChartPoint {
+                        point.busy_backends.map(|value| ChartPoint {
                             at_unix_ms: point.at_unix_ms,
                             value,
                         })
@@ -193,6 +203,16 @@ async fn refresh_chart(mut cs: Signal<StatsState>) {
             note,
             duplicate_of,
         });
+
+        // The three per-minute measures. Separate request from the load series: a
+        // different section, a different resolution, and only this card reads it.
+        if let Ok(history) = crate::api::get_minute_history(db.path.as_str(), CHART_HOURS).await {
+            if let Some(last) = history.minutes.last() {
+                minutes_to_ms = minutes_to_ms.max(last.at_unix_ms);
+            }
+
+            minutes.push((db.path.clone(), minute_series(&history.minutes)));
+        }
     }
 
     // The window is anchored to the newest sample across the panels rather than to
@@ -222,10 +242,53 @@ async fn refresh_chart(mut cs: Signal<StatsState>) {
     }
 
     write.chart = series;
+    write.minutes = minutes;
+    write.minutes_to_ms = minutes_to_ms;
+    write.minutes_from_ms = minutes_to_ms - CHART_HOURS * 60 * 60 * 1_000;
     write.chart_server = Some(requested);
     write.chart_from_ms = to_ms - CHART_HOURS * 60 * 60 * 1_000;
     write.chart_to_ms = to_ms;
     write.chart_note = note;
+}
+
+/// The three measures, each on its own panel because each is in its own unit — see
+/// [`MinuteCharts`] for why they must not share an axis.
+///
+/// A row with no value for a measure contributes no point to that panel rather than a
+/// zero: a minute in which nothing ran long enough to be sampled did not have a
+/// longest query of zero seconds.
+fn minute_series(rows: &[crate::models::MinutePoint]) -> Vec<MinuteSeries> {
+    let point = |at_unix_ms: i64, value: f64| ChartPoint { at_unix_ms, value };
+
+    vec![
+        MinuteSeries {
+            title: "Queries".to_string(),
+            note: "per minute".to_string(),
+            unit: MinuteUnit::Count,
+            points: rows
+                .iter()
+                .filter_map(|row| row.calls.map(|calls| point(row.at_unix_ms, calls as f64)))
+                .collect(),
+        },
+        MinuteSeries {
+            title: "Average time".to_string(),
+            note: "per query".to_string(),
+            unit: MinuteUnit::Milliseconds,
+            points: rows
+                .iter()
+                .filter_map(|row| row.avg_exec_ms.map(|ms| point(row.at_unix_ms, ms)))
+                .collect(),
+        },
+        MinuteSeries {
+            title: "Longest".to_string(),
+            note: "sampled — a floor, not a maximum".to_string(),
+            unit: MinuteUnit::Seconds,
+            points: rows
+                .iter()
+                .filter_map(|row| row.longest_secs.map(|secs| point(row.at_unix_ms, secs)))
+                .collect(),
+        },
+    ]
 }
 
 /// Tone for a fill ratio: fine until it is most of the way there.
@@ -1015,7 +1078,12 @@ fn WriteIoRow(writes: WriteIo) -> Element {
 /// The last minute: how many statements ran, how long they took on average, and the
 /// longest one.
 #[component]
-fn ThroughputCard(throughput: Option<Throughput>) -> Element {
+fn ThroughputCard(
+    throughput: Option<Throughput>,
+    minutes: Vec<MinuteSeries>,
+    from_unix_ms: i64,
+    to_unix_ms: i64,
+) -> Element {
     let Some(throughput) = throughput else {
         return rsx! {
             div { class: "card",
@@ -1108,6 +1176,16 @@ fn ThroughputCard(throughput: Option<Throughput>) -> Element {
                         if let Some(query) = throughput.slowest_finished_query.clone() {
                             span { class: "mono", title: "{query}", " — {query}" }
                         }
+                    }
+                }
+
+                div { style: "margin-top: 16px;",
+                    MinuteCharts {
+                        series: minutes,
+                        from_unix_ms,
+                        to_unix_ms,
+                        empty_note: "No minutes recorded yet — the first row appears about two minutes after start-up, and the series needs pg_stat_statements."
+                            .to_string(),
                     }
                 }
             }
@@ -1228,7 +1306,18 @@ fn DatabaseSection(cs: Signal<StatsState>, db: DatabaseStats) -> Element {
                 }
             }
 
-            ThroughputCard { throughput: stats.throughput.clone() }
+            ThroughputCard {
+                throughput: stats.throughput.clone(),
+                minutes: cs
+                    .read()
+                    .minutes
+                    .iter()
+                    .find(|(path, _)| path == &db.path)
+                    .map(|(_, series)| series.clone())
+                    .unwrap_or_default(),
+                from_unix_ms: cs.read().minutes_from_ms,
+                to_unix_ms: cs.read().minutes_to_ms,
+            }
             LoadCard { load: stats.load.clone() }
             DiskIoCard {
                 cs,
