@@ -4,11 +4,12 @@ use dioxus::prelude::*;
 
 use crate::components::atoms::{StatePill, StateTone};
 use crate::components::{
-    ChartPoint, LoadCharts, LoadSeries, MinuteCharts, MinuteSeries, MinuteUnit, Topbar,
+    ChartPoint, LoadCharts, LoadSeries, MinuteCharts, MinuteSeries, MinuteUnit, Modal, ModalSize,
+    Topbar,
 };
 use crate::models::{
     Activity, DatabaseStats, DiskIo, Health, HistoryInfo, Load, ServerInfo, ServerRef,
-    ServerSettings, ServerStats, Tables, Throughput, WriteIo, fmt, section,
+    ServerSettings, ServerStats, Statement, Tables, Throughput, WriteIo, fmt, section,
 };
 
 /// Slower than the requests page's 1s: nothing here moves faster than the
@@ -56,6 +57,10 @@ pub struct StatsState {
     /// Window the minute series covers.
     minutes_from_ms: i64,
     minutes_to_ms: i64,
+    /// The statement whose dialog is open, with the mount it came from. `None` when
+    /// no dialog is showing — this project has one dialog, so an Option is the whole
+    /// state machine.
+    viewing: Option<(String, Statement)>,
     /// Mount whose extension install is in flight.
     extension_busy: Option<String>,
     /// What the last install attempt reported, verbatim.
@@ -759,6 +764,20 @@ fn LoadCard(cs: Signal<StatsState>, path: String, load: Load, server: ServerInfo
                         td { class: "mono num", "{fmt::millis(statement.total_exec_ms)}" }
                         td { class: "mono num", "{fmt::int(statement.calls)}" }
                         td { class: "mono num", "{fmt::int(statement.delta_calls)}" }
+                        td {
+                            button {
+                                class: "btn btn--ghost btn--sm",
+                                onclick: {
+                                    let path = path.clone();
+                                    let statement = statement.clone();
+                                    move |_| {
+                                        cs.clone().write().viewing =
+                                            Some((path.clone(), statement.clone()));
+                                    }
+                                },
+                                "View"
+                            }
+                        }
                     }
                 }
             })
@@ -779,6 +798,7 @@ fn LoadCard(cs: Signal<StatsState>, path: String, load: Load, server: ServerInfo
                         th { class: "num", title: "Since the extension was last reset", "Total" }
                         th { class: "num", "Calls" }
                         th { class: "num", title: "Calls since the previous tick", "New" }
+                        th { }
                     }
                 }
                 tbody { {rows.into_iter()} }
@@ -1332,6 +1352,108 @@ fn ThroughputCard(
     }
 }
 
+/// One statement, in full, with every figure the collector has for it.
+///
+/// The table ellipsizes the SQL because a row has to stay one line; this is where the
+/// whole thing is readable. 95% of the viewport in both directions, since a normalized
+/// statement is both wide and tall.
+#[component]
+fn StatementDialog(cs: Signal<StatsState>, path: String, statement: Statement) -> Element {
+    let close = move |_| {
+        cs.clone().write().viewing = None;
+    };
+
+    let meta: Vec<(&str, String, &str)> = vec![
+        (
+            "Load",
+            statement.share_label(),
+            "Milliseconds of execution per wall-clock second since the previous tick. 1000 is one backend saturated by this statement alone.",
+        ),
+        (
+            "Mean",
+            fmt::millis(statement.mean_exec_ms),
+            "Average execution time across every call the extension has counted.",
+        ),
+        (
+            "Total",
+            fmt::millis(statement.total_exec_ms),
+            "Execution time since pg_stat_statements was last reset.",
+        ),
+        (
+            "Calls",
+            fmt::int(statement.calls),
+            "Executions since the extension was last reset.",
+        ),
+        (
+            "New calls",
+            fmt::int(statement.delta_calls),
+            "Executions since the previous collection tick.",
+        ),
+        (
+            "New time",
+            fmt::millis(statement.delta_exec_ms),
+            "Execution time accumulated since the previous tick — what the ranking is by.",
+        ),
+        (
+            "Rows",
+            fmt::int(statement.rows_returned),
+            "Rows returned or affected, in total.",
+        ),
+        (
+            "Blocks hit",
+            fmt::int(statement.blks_hit),
+            "Shared-buffer hits: pages this statement found in memory.",
+        ),
+        (
+            "Blocks read",
+            fmt::int(statement.blks_read),
+            "Pages this statement had to fetch from outside shared buffers — possibly from the OS cache rather than the disk.",
+        ),
+    ];
+
+    let cells: Vec<Element> = meta
+        .into_iter()
+        .map(|(label, value, hint)| {
+            rsx! {
+                div { class: "statement-meta__item", key: "{label}", title: "{hint}",
+                    span { class: "statement-meta__label", "{label}" }
+                    span { class: "statement-meta__value", "{value}" }
+                }
+            }
+        })
+        .collect();
+
+    let query_id = statement
+        .query_id
+        .clone()
+        .unwrap_or_else(|| fmt::NONE.to_string());
+
+    rsx! {
+        Modal {
+            title: "Statement".to_string(),
+            subtitle: format!("{} · queryid {}", path, query_id),
+            size: ModalSize::Full,
+            on_close: move |_| close(()),
+
+            div { class: "statement-meta", {cells.into_iter()} }
+
+            p { class: "statement-section-title", "SQL" }
+            pre { class: "statement-sql", "{statement.query_label()}" }
+
+            p { class: "muted", style: "margin: 12px 0 0; font-size: 11.5px; line-height: 1.5;",
+                "Constants are replaced by "
+                code { class: "mono", "$1" }
+                ", "
+                code { class: "mono", "$2" }
+                " … — this is how "
+                code { class: "mono", "pg_stat_statements" }
+                " stores a statement, so every execution with different values counts as one "
+                "row. The text is truncated at 1024 characters when collected."
+            }
+        }
+    }
+}
+
 #[component]
 fn LongestQueriesCard(activity: Activity) -> Element {
     if !section::is_ready(&activity.state) {
@@ -1680,6 +1802,12 @@ pub fn Stats() -> Element {
                     HistoryBar { history: cs_ra.stats.history.clone(), error: cs_ra.error.clone() }
                     {body}
                 }
+            }
+
+            // Rendered last and at page level, so it overlays every card rather than
+            // being clipped by the one whose table opened it.
+            if let Some((path, statement)) = cs_ra.viewing.clone() {
+                StatementDialog { cs, path, statement }
             }
         }
     }

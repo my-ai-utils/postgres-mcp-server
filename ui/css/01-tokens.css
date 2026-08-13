@@ -34,6 +34,10 @@
     --reader: var(--accent);
     --reader-soft: var(--accent-soft);
 
+    /* Dimming behind a dialog. Dark in both themes — an overlay that inverted with
+       the theme would stop reading as "behind". */
+    --bg-overlay: rgba(29, 32, 48, 0.45);
+
     /* Chart marks get their own token rather than reusing --accent, which is tuned
        for text and links. One hue is enough because each database gets its own
        panel: identity is carried by the panel title, not by colour. Both modes were
@@ -83,6 +87,8 @@
     --writer-soft: var(--info-soft);
     --reader: var(--accent);
     --reader-soft: var(--accent-soft);
+
+    --bg-overlay: rgba(3, 6, 15, 0.6);
 
     /* Re-stepped for the dark surface, not flipped: the light accent #8c68cd and the
        UI's dark accent #b298ee both fail the dark lightness band (0.48–0.67), the

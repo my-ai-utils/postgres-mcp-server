@@ -9,5 +9,8 @@ pub use minute_chart::*;
 mod load_chart;
 pub use load_chart::*;
 
+mod modal;
+pub use modal::*;
+
 mod topbar;
 pub use topbar::*;
