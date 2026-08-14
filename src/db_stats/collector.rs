@@ -39,12 +39,15 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// per-query bound in [`crate::postgres::PostgresAccess::query_typed`].
 ///
 /// Databases are collected concurrently, so this bounds the slowest single
-/// database rather than their sum. One database's tick makes at most three
-/// sequential queries, each hard-bounded at twice [`QUERY_TIMEOUT`], so 30 seconds
-/// is the real worst case — and an unreachable database costs only the first of the
-/// three, because the tick gives up once capabilities fail. The margin is
-/// deliberate: this timer firing means something is wrong that the query bound did
-/// not catch, and it should not be reachable in ordinary operation.
+/// database rather than their sum. One database's tick makes at most five
+/// sequential queries — capabilities, then the three `pg_stat_activity` reads and
+/// the health counters on the fast tick, or capabilities, tables, statements and
+/// the two I/O reads on the slow one — each hard-bounded at twice
+/// [`QUERY_TIMEOUT`], so 50 seconds is the real worst case, and an unreachable
+/// database costs only the first of them, because the tick gives up once
+/// capabilities fail. The margin is deliberate: this timer firing means something is
+/// wrong that the query bound did not catch, and it should not be reachable in
+/// ordinary operation.
 const ITERATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What a section says when the database itself could not be reached. The driver

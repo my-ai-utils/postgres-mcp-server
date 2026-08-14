@@ -20,7 +20,7 @@ const SECTION_MINUTES: &str = "minutes";
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct DbStatsToolCallRequest {
     #[property(
-        description: "Which section to return. One of: 'tables' (largest tables with their size, row estimates, scan counts and last vacuum), 'load' (the statements consuming the most execution time), 'activity' (connections and the longest-running queries), 'health' (database-wide counters and throughput), 'io' (which tables are read off disk, plus WAL and checkpoint write volume), 'minutes' (the last minute's statement count, average execution time and longest query), or 'all'. Defaults to 'all'."
+        description: "Which section to return. One of: 'tables' (largest tables with their size, row estimates, scan counts and last vacuum), 'load' (the statements consuming the most execution time), 'activity' (connection counts, the list of backends connected right now with their state and statement, and the longest-running queries), 'health' (database-wide counters and throughput), 'io' (which tables are read off disk, plus WAL and checkpoint write volume), 'minutes' (the last minute's statement count, average execution time and longest query), or 'all'. Defaults to 'all'."
     )]
     pub section: String,
 }
@@ -54,7 +54,7 @@ impl DbStatsMcpService {
 
 impl ToolDefinition for DbStatsMcpService {
     const FUNC_NAME: &'static str = "db_stats";
-    const DESCRIPTION: &'static str = "Read collected statistics for the database described in the server instructions: table sizes and row estimates, the statements consuming the most execution time, connection counts and long-running queries, database-wide throughput counters, and disk I/O (which tables are being read off disk, plus WAL and checkpoint write volume). Useful before writing a query against an unfamiliar schema — it says which tables are large, which have no index usage, and which are bloated. Served from a cache refreshed in the background, so it costs the database nothing: activity is a few seconds old, sizes and statement timings up to a minute. Every section reports its own availability; 'unavailable' with a reason means this server or this account cannot produce it (for example pg_stat_statements not being installed). Note that Postgres exposes no host CPU metric at all — 'busyBackends' and 'execMsPerSec' are execution-time proxies, not CPU percentages.";
+    const DESCRIPTION: &'static str = "Read collected statistics for the database described in the server instructions: table sizes and row estimates, the statements consuming the most execution time, connection counts and who is holding those connections, long-running queries, database-wide throughput counters, and disk I/O (which tables are being read off disk, plus WAL and checkpoint write volume). Useful before writing a query against an unfamiliar schema — it says which tables are large, which have no index usage, and which are bloated. Served from a cache refreshed in the background, so it costs the database nothing: activity is a few seconds old, sizes and statement timings up to a minute. Every section reports its own availability; 'unavailable' with a reason means this server or this account cannot produce it (for example pg_stat_statements not being installed). Note that Postgres exposes no host CPU metric at all — 'busyBackends' and 'execMsPerSec' are execution-time proxies, not CPU percentages.";
 }
 
 #[async_trait::async_trait]

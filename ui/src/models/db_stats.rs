@@ -260,6 +260,91 @@ impl LongQuery {
     }
 }
 
+/// One client backend of this database, whatever it is doing.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Connection {
+    pub pid: Option<i64>,
+    pub user_name: Option<String>,
+    pub application_name: Option<String>,
+    /// `None` over the unix socket — which is what Postgres running next to its
+    /// client looks like, not a value the server withheld.
+    pub client_addr: Option<String>,
+    pub backend_state: Option<String>,
+    pub wait: Option<String>,
+    pub connected_at: Option<String>,
+    pub connected_secs: Option<f64>,
+    /// Time in the current state. On `idle in transaction` this is the age of a
+    /// transaction that is still holding its locks.
+    pub state_secs: Option<f64>,
+    pub running_secs: Option<f64>,
+    /// The current statement — or, on an idle backend, the one it ran last.
+    pub query: Option<String>,
+    /// This server's own collector connection. It holds a real connection slot, so
+    /// it is listed like any other and labelled instead of being dropped.
+    pub is_collector: bool,
+}
+
+impl Connection {
+    pub fn who(&self) -> String {
+        let user = self.user_name.as_deref().unwrap_or(fmt::NONE);
+
+        match self.application_name.as_deref() {
+            Some(app) if !app.trim().is_empty() => format!("{} · {}", user, app),
+            _ => user.to_string(),
+        }
+    }
+
+    /// A backend with no `client_addr` came in over the unix socket. Saying so beats
+    /// a `—`, which would read as "the server does not know where this is from".
+    pub fn client_label(&self) -> &str {
+        match self.client_addr.as_deref() {
+            Some(addr) if !addr.trim().is_empty() => addr,
+            _ => "local",
+        }
+    }
+
+    /// The backend's state, or a statement that this account may not read it —
+    /// never a blank cell, which would read as a backend doing nothing.
+    pub fn state_label(&self) -> &str {
+        match self.backend_state.as_deref() {
+            Some(state) if !state.trim().is_empty() => state,
+            _ => "not visible",
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.backend_state.as_deref() == Some("active")
+    }
+
+    /// Includes `idle in transaction (aborted)`, which is the same problem with a
+    /// failed statement in front of it.
+    pub fn is_idle_in_transaction(&self) -> bool {
+        self.backend_state
+            .as_deref()
+            .map(|state| state.starts_with("idle in transaction"))
+            .unwrap_or(false)
+    }
+
+    /// The query text, or why there is none. On a backend that is not active this is
+    /// the last statement it ran rather than a running one — the state column next to
+    /// it is what says which.
+    ///
+    /// Postgres has two different ways of saying nothing here, and they are not the
+    /// same thing: an **empty** string on a backend whose state is readable means it
+    /// has genuinely not run a statement yet (a connection a pool has just opened
+    /// looks exactly like this), while a backend this account may not inspect has its
+    /// query text blanked along with its state. Reporting the first as the second
+    /// would blame the account for a connection that is simply new.
+    pub fn query_label(&self) -> &str {
+        match self.query.as_deref() {
+            Some(query) if !query.trim().is_empty() => query,
+            _ if self.backend_state.is_none() => "<not visible to this account>",
+            _ => fmt::NONE,
+        }
+    }
+}
+
 #[derive(Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Activity {
@@ -274,6 +359,10 @@ pub struct Activity {
     pub state_unknown: Option<i64>,
     pub max_connections: Option<i64>,
     pub longest: Vec<LongQuery>,
+    /// Every client backend on this database, busiest first. Capped by the server at
+    /// 100 rows, which is what [`Activity::connections_subtitle`] compares against
+    /// `in_this_db` to detect.
+    pub connections: Vec<Connection>,
 }
 
 impl Activity {
@@ -285,6 +374,25 @@ impl Activity {
             fmt::int(self.total_client_backends),
             fmt::int(self.max_connections)
         )
+    }
+
+    /// What the connections card says it is showing.
+    ///
+    /// The server caps the list, so this says `100 of 214` whenever it was cut: a
+    /// table quietly showing a hundred of two hundred connections would be read as
+    /// the whole truth.
+    ///
+    /// The count and the total come from two queries a few milliseconds apart, so a
+    /// connection that opened in between can make the list the longer of the two.
+    /// That is not a cut list, and is reported as the plain count rather than as
+    /// `41 of 40`.
+    pub fn connections_subtitle(&self) -> String {
+        let shown = self.connections.len() as i64;
+
+        match self.in_this_db {
+            Some(total) if total > shown => format!("{} of {}", shown, fmt::group(total)),
+            _ => format!("{} connected", fmt::group(shown)),
+        }
     }
 
     /// How full the connection slots are, for the tile's tone.
@@ -799,6 +907,97 @@ mod tests {
         assert_eq!(fmt::bytes(Some(2_147_483_648)), "2.0 GB");
         // A value the database could not report is never a zero.
         assert_eq!(fmt::bytes(None), fmt::NONE);
+    }
+
+    fn connection(state: Option<&str>) -> Connection {
+        Connection {
+            pid: Some(42),
+            user_name: Some("postgres".to_string()),
+            application_name: None,
+            client_addr: None,
+            backend_state: state.map(|state| state.to_string()),
+            wait: None,
+            connected_at: None,
+            connected_secs: Some(10.0),
+            state_secs: Some(1.0),
+            running_secs: None,
+            query: None,
+            is_collector: false,
+        }
+    }
+
+    fn activity(connections: Vec<Connection>, in_this_db: Option<i64>) -> Activity {
+        Activity {
+            in_this_db,
+            connections,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_cut_connection_list_says_so() {
+        // The server caps the list; the card has to admit it rather than showing a
+        // hundred rows as if they were all of them.
+        let capped = activity(vec![connection(Some("idle")); 100], Some(214));
+        assert_eq!(capped.connections_subtitle(), "100 of 214");
+
+        let complete = activity(vec![connection(Some("idle")); 3], Some(3));
+        assert_eq!(complete.connections_subtitle(), "3 connected");
+    }
+
+    #[test]
+    fn a_connection_opened_between_the_two_queries_is_not_a_cut_list() {
+        // The count and the total are read a few milliseconds apart, so the list can
+        // be the longer of the two. "4 of 3" would be nonsense.
+        let raced = activity(vec![connection(Some("idle")); 4], Some(3));
+
+        assert_eq!(raced.connections_subtitle(), "4 connected");
+    }
+
+    #[test]
+    fn an_aborted_transaction_is_still_idle_in_transaction() {
+        // Postgres reports it as "idle in transaction (aborted)" — the same held
+        // locks, with a failed statement in front of them.
+        assert!(connection(Some("idle in transaction")).is_idle_in_transaction());
+        assert!(connection(Some("idle in transaction (aborted)")).is_idle_in_transaction());
+
+        assert!(!connection(Some("idle")).is_idle_in_transaction());
+        assert!(!connection(Some("active")).is_idle_in_transaction());
+        assert!(!connection(None).is_idle_in_transaction());
+    }
+
+    #[test]
+    fn a_backend_with_no_client_address_came_in_over_the_unix_socket() {
+        assert_eq!(connection(None).client_label(), "local");
+
+        let mut remote = connection(Some("active"));
+        remote.client_addr = Some("10.0.0.4".to_string());
+        assert_eq!(remote.client_label(), "10.0.0.4");
+    }
+
+    #[test]
+    fn a_connection_that_has_run_nothing_is_not_reported_as_a_privilege_problem() {
+        // A pool that has just opened a connection reports an empty query with a
+        // perfectly readable state — seen on a live server. Only a blanked *state*
+        // means the account cannot look.
+        let mut fresh = connection(Some("idle"));
+        fresh.query = Some(String::new());
+        assert_eq!(fresh.query_label(), fmt::NONE);
+
+        let hidden = connection(None);
+        assert_eq!(hidden.query_label(), "<not visible to this account>");
+
+        let mut running = connection(Some("active"));
+        running.query = Some("SELECT 1".to_string());
+        assert_eq!(running.query_label(), "SELECT 1");
+    }
+
+    #[test]
+    fn a_state_this_account_may_not_read_is_never_a_blank_cell() {
+        // A blank would read as a backend doing nothing, which is the one thing it
+        // does not mean.
+        assert_eq!(connection(None).state_label(), "not visible");
+        assert_eq!(connection(Some("active")).state_label(), "active");
     }
 
     #[test]

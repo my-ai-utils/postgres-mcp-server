@@ -97,6 +97,14 @@ Not for a superuser, not for `pg_monitor`: no system view exposes host CPU at al
 
 Sizes, by contrast, are exact and need no privileges: `pg_total_relation_size` split into heap / indexes / TOAST, plus row estimates, scan counts and last vacuum/analyze, for the **top 25 tables by total size** (the response says `top 25 of 812`, never implying the list is complete). Row counts are planner estimates from `pg_stat_user_tables`, not `count(*)` — exact counts would mean a full scan of every listed table, once a minute.
 
+### Who is connected
+
+The connection *counts* answer "how many"; the **connections list** answers "which". One row per client backend of that database, from `pg_stat_activity`: user and application, where it connected from (`local` for the unix socket), its state, how long it has been in that state, how long the connection itself has been open, what it is waiting on, and its current statement — or, on a backend that is not active, the last one it ran.
+
+The list is ordered active → `idle in transaction` → idle, longest-in-state first, and cut at **100 rows**; what the cap drops is the dull end of it, and the number shown is always published against `inThisDb`, the total it was cut from. It is also the only place an `idle in transaction` backend turns up: it is in no slow-query list, because it is not running anything — while it goes on holding every lock it took and pinning the xmin horizon against `VACUUM`. The UI marks that column once a backend has sat there for 5 seconds and reddens it at a minute.
+
+This server's own collector connection is in the list, tagged `collector`, rather than hidden: it holds a `max_connections` slot like any other client, and dropping it would leave the list one shorter than the count beside it with nothing to explain the difference. (The *state* counts do exclude it, and say so — a connection that is `active` because it is running the query that measures activity would otherwise report one active backend forever on an idle database.)
+
 ### What an admin account changes
 
 Only the parts that read *other users'* rows. Postgres returns a row per backend and per statement to everyone, but blanks `state`, `query` and `wait_event` for backends the account does not own unless it is a member of **`pg_monitor`** or **`pg_read_all_stats`** (superusers inherit both).
@@ -121,7 +129,7 @@ If a counter goes backwards, or `stats_reset` changes between two samples, that 
 
 | Timer | Every | What |
 |---|---|---|
-| `DbStatsFast` | **5 s** | `pg_stat_activity` counts + longest queries, `pg_stat_database` counters → also appended to history |
+| `DbStatsFast` | **5 s** | `pg_stat_activity` counts + connection list + longest queries, `pg_stat_database` counters → also appended to history |
 | `DbStatsSlow` | **60 s** | capabilities, table sizes, `pg_stat_statements` |
 | `DbStatsHourlyHistory` | **1 h** | appends table sizes + statement costs to history, then deletes everything past the retention horizon |
 
@@ -296,7 +304,7 @@ The session is established automatically on first request (`initialize`); subseq
 - **`numeric`/`decimal` and other unmapped types** come back as `[unsupported pg type: …]`, not as values — cast them in the query. (This affects `sql_request` only; the statistics queries are hand-written with explicit casts and read their columns typed.)
 - **No host CPU metric** — Postgres does not expose one to any role. `busyBackends` and `execMsPerSec` are execution-time proxies; see *Statistics*.
 - **`busyBackends` needs Postgres 14+**, and the *load* section needs `pg_stat_statements` on **13+**. Both report `unavailable` with the reason rather than showing zeroes.
-- **Statistics are per mount, scoped to that mount's database.** `pg_stat_activity` and `pg_stat_statements` are cluster-wide, but the long-running queries and the statement list are filtered to the current database so an endpoint never leaks another database's SQL text. Connection *counts* are cluster-wide, since a number leaks nothing and `max_connections` is what they have to be read against.
+- **Statistics are per mount, scoped to that mount's database.** `pg_stat_activity` and `pg_stat_statements` are cluster-wide, but the connection list, the long-running queries and the statement list are filtered to the current database so an endpoint never leaks another database's SQL text. Connection *counts* are cluster-wide, since a number leaks nothing and `max_connections` is what they have to be read against.
 - **History resolution is fixed** — 5 s for load, 1 h for sizes and statements — and retention is a hardcoded 3 days, swept hourly, so it can overshoot the horizon by up to an hour.
 
 ## Project layout

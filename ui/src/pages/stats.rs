@@ -1531,6 +1531,137 @@ fn LongestQueriesCard(activity: Activity) -> Element {
     }
 }
 
+/// How long a backend has sat in `idle in transaction`, coloured.
+///
+/// A transaction nobody is executing anything in still holds every lock it took and
+/// still pins the xmin horizon, so VACUUM cannot reclaim any row version newer than
+/// it. A second or two of that is a client between statements; a minute of it is a
+/// forgotten `BEGIN`, and it gets more expensive the longer it sits there.
+fn idle_in_transaction_class(state_secs: Option<f64>) -> &'static str {
+    match state_secs {
+        Some(secs) if secs >= 60.0 => "mono num state--bad-text",
+        Some(secs) if secs >= 5.0 => "mono num state--warn-text",
+        _ => "mono num",
+    }
+}
+
+/// Who is holding a connection to this database, and what they are doing with it.
+///
+/// The tiles above answer *how many* connections there are; this answers *which*,
+/// which is the question asked the moment that count is higher than it should be.
+/// It is also the only place an `idle in transaction` backend can be found — it
+/// appears in no slow-query list, because it is not running anything.
+#[component]
+fn ConnectionsCard(activity: Activity) -> Element {
+    if !section::is_ready(&activity.state) {
+        return rsx! {
+            div { class: "card",
+                div { class: "card__header",
+                    span { class: "card__title", "Connections" }
+                }
+                div { class: "card__body",
+                    SectionNotice { state: activity.state.clone(), reason: activity.reason.clone() }
+                }
+            }
+        };
+    }
+
+    if activity.connections.is_empty() {
+        return rsx! {
+            div { class: "card",
+                div { class: "card__header",
+                    span { class: "card__title", "Connections" }
+                    span { class: "card__subtitle", "none" }
+                }
+                div { class: "card__body",
+                    p { class: "muted", style: "margin: 0; font-size: 12.5px;",
+                        "Nothing is connected to this database right now."
+                    }
+                }
+            }
+        };
+    }
+
+    let rows: Vec<Element> = activity
+        .connections
+        .iter()
+        .map(|connection| {
+            let state_class = if connection.is_idle_in_transaction() {
+                "mono state--warn-text"
+            } else if connection.backend_state.is_none() {
+                "mono faint"
+            } else {
+                "mono"
+            };
+
+            let state_secs_class = if connection.is_idle_in_transaction() {
+                idle_in_transaction_class(connection.state_secs)
+            } else {
+                "mono num"
+            };
+
+            rsx! {
+                tr { key: "{connection.pid:?}",
+                    td { class: "mono num", "{fmt::int(connection.pid)}" }
+                    td {
+                        span { class: "mono dt-ellipsis", style: "max-width: 200px;", title: "{connection.who()}",
+                            "{connection.who()}"
+                        }
+                        if connection.is_collector {
+                            span {
+                                class: "dt-tag",
+                                title: "This server's own statistics collector. It is listed because it holds a connection slot exactly like any other client.",
+                                "collector"
+                            }
+                        }
+                    }
+                    td { class: "mono", "{connection.client_label()}" }
+                    td { class: state_class, "{connection.state_label()}" }
+                    td { class: state_secs_class, "{fmt::seconds(connection.state_secs)}" }
+                    td { class: "mono num", "{fmt::seconds(connection.connected_secs)}" }
+                    td { class: "mono", "{connection.wait.clone().unwrap_or_else(|| fmt::NONE.to_string())}" }
+                    td {
+                        span {
+                            class: if connection.is_active() { "mono dt-ellipsis" } else { "mono dt-ellipsis faint" },
+                            style: "max-width: 360px;",
+                            title: "{connection.query_label()}",
+                            "{connection.query_label()}"
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    rsx! {
+        div { class: "card",
+            div { class: "card__header",
+                span { class: "card__title", "Connections" }
+                span { class: "card__subtitle", "{activity.connections_subtitle()}" }
+            }
+            table { class: "dt",
+                thead {
+                    tr {
+                        th { class: "num", "PID" }
+                        th { "Who" }
+                        th { title: "Where the client connected from. 'local' means the unix socket.", "From" }
+                        th { "State" }
+                        th {
+                            class: "num",
+                            title: "How long the backend has been in that state — the age of the statement on an active one, and of the open transaction on an 'idle in transaction' one.",
+                            "In state"
+                        }
+                        th { class: "num", title: "Age of the connection itself", "Connected" }
+                        th { title: "What the backend is blocked on, if anything", "Wait" }
+                        th { title: "The current statement — or, on a backend that is not active, the last one it ran (shown faint). Truncated at 512 characters.", "Statement" }
+                    }
+                }
+                tbody { {rows.into_iter()} }
+            }
+        }
+    }
+}
+
 #[component]
 fn DatabaseSection(cs: Signal<StatsState>, db: DatabaseStats) -> Element {
     let stats = db.stats;
@@ -1593,6 +1724,7 @@ fn DatabaseSection(cs: Signal<StatsState>, db: DatabaseStats) -> Element {
             }
             TablesCard { tables: stats.tables.clone() }
             LongestQueriesCard { activity: stats.activity.clone() }
+            ConnectionsCard { activity: stats.activity.clone() }
         }
     }
 }

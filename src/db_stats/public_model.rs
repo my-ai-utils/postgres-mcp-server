@@ -25,8 +25,9 @@ use serde::{Deserialize, Serialize};
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 use super::{
-    ActivityStats, DbHealth, DbHealthRates, DbStatsSnapshot, DiskIo, LongRunningQuery, Section,
-    ServerCapabilities, TableStats, TablesStats, TopStatement, TopStatements,
+    ActivityStats, BackendConnection, DbHealth, DbHealthRates, DbStatsSnapshot, DiskIo,
+    LongRunningQuery, Section, ServerCapabilities, TableStats, TablesStats, TopStatement,
+    TopStatements,
 };
 
 fn as_rfc3339(value: Option<DateTimeAsMicroseconds>) -> Option<String> {
@@ -120,6 +121,52 @@ impl LongQueryModel {
 
 #[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
 #[serde(rename_all = "camelCase")]
+pub struct ConnectionModel {
+    pub pid: Option<i64>,
+    pub user_name: Option<String>,
+    pub application_name: Option<String>,
+    // null for a backend connected over the unix socket — not a missing value.
+    pub client_addr: Option<String>,
+    // "active" | "idle" | "idle in transaction" | … null when this account may not
+    // read another user's state.
+    pub backend_state: Option<String>,
+    // "Lock: transactionid", "IO: DataFileRead", … null when not waiting.
+    pub wait: Option<String>,
+    pub connected_at: Option<String>,
+    pub connected_secs: Option<f64>,
+    // How long the backend has been in its current state — the age of the
+    // transaction, on an "idle in transaction" one.
+    pub state_secs: Option<f64>,
+    // Age of the current statement. On an idle backend, of the one it ran last.
+    pub running_secs: Option<f64>,
+    // The current statement, or the last one on an idle backend. Truncated at 512
+    // characters; the full text of the slow ones is on `longest`.
+    pub query: Option<String>,
+    // This server's own collector connection, which holds a real connection slot.
+    pub is_collector: bool,
+}
+
+impl ConnectionModel {
+    fn new(src: &BackendConnection) -> Self {
+        Self {
+            pid: src.pid.map(|pid| pid as i64),
+            user_name: src.user_name.clone(),
+            application_name: src.application_name.clone(),
+            client_addr: src.client_addr.clone(),
+            backend_state: src.state.clone(),
+            wait: src.wait.clone(),
+            connected_at: src.backend_start.clone(),
+            connected_secs: src.connected_secs,
+            state_secs: src.state_secs,
+            running_secs: src.running_secs,
+            query: src.query.clone(),
+            is_collector: src.is_collector,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, MyHttpObjectStructure)]
+#[serde(rename_all = "camelCase")]
 pub struct ActivityModel {
     pub state: String,
     pub reason: Option<String>,
@@ -136,6 +183,10 @@ pub struct ActivityModel {
     pub max_connections: Option<i64>,
     // Longest-running active statements on THIS database only, longest first.
     pub longest: Vec<LongQueryModel>,
+    // Every client backend on THIS database, busiest first: active, then idle in
+    // transaction, then idle — each group longest-in-state first. Capped at 100
+    // rows, which `inThisDb` is the total for.
+    pub connections: Vec<ConnectionModel>,
 }
 
 impl ActivityModel {
@@ -155,6 +206,9 @@ impl ActivityModel {
             max_connections: data.and_then(|d| d.max_connections),
             longest: data
                 .map(|d| d.longest.iter().map(LongQueryModel::new).collect())
+                .unwrap_or_default(),
+            connections: data
+                .map(|d| d.connections.iter().map(ConnectionModel::new).collect())
                 .unwrap_or_default(),
         }
     }

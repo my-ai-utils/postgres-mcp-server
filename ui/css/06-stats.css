@@ -559,3 +559,21 @@
     color: var(--danger);
     font-weight: 600;
 }
+
+/* --- Row tag ---
+   Marks a row for what it is rather than for a value in it — the connections list
+   uses it to point at this server's own collector backend, which is in the list
+   because it holds a connection slot like any other client. */
+.dt-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--bg-sunken);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 10px;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    vertical-align: middle;
+}
