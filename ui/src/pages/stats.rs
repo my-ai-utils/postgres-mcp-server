@@ -1551,6 +1551,12 @@ fn idle_in_transaction_class(state_secs: Option<f64>) -> &'static str {
 /// which is the question asked the moment that count is higher than it should be.
 /// It is also the only place an `idle in transaction` backend can be found — it
 /// appears in no slow-query list, because it is not running anything.
+///
+/// Rows are rendered in the order the server sends them: grouped by application,
+/// busiest first inside each group. The page deliberately does not re-sort — the
+/// server's order is also what decides which rows survive the 100-row cap, and a
+/// second sort here would present a truncated list as if it were ranked by
+/// something it was not cut by.
 #[component]
 fn ConnectionsCard(activity: Activity) -> Element {
     if !section::is_ready(&activity.state) {
@@ -1604,8 +1610,11 @@ fn ConnectionsCard(activity: Activity) -> Element {
                 tr { key: "{connection.pid:?}",
                     td { class: "mono num", "{fmt::int(connection.pid)}" }
                     td {
-                        span { class: "mono dt-ellipsis", style: "max-width: 200px;", title: "{connection.who()}",
-                            "{connection.who()}"
+                        span {
+                            class: "mono dt-ellipsis",
+                            style: "max-width: 200px;",
+                            title: "{connection.application_label()}",
+                            "{connection.application_label()}"
                         }
                         if connection.is_collector {
                             span {
@@ -1615,6 +1624,7 @@ fn ConnectionsCard(activity: Activity) -> Element {
                             }
                         }
                     }
+                    td { class: "mono", "{connection.user_label()}" }
                     td { class: "mono", "{connection.client_label()}" }
                     td { class: state_class, "{connection.state_label()}" }
                     td { class: state_secs_class, "{fmt::seconds(connection.state_secs)}" }
@@ -1643,7 +1653,11 @@ fn ConnectionsCard(activity: Activity) -> Element {
                 thead {
                     tr {
                         th { class: "num", "PID" }
-                        th { "Who" }
+                        th {
+                            title: "The name the client gave itself. The list is grouped by it, and clients that set none come last.",
+                            "Application"
+                        }
+                        th { "User" }
                         th { title: "Where the client connected from. 'local' means the unix socket.", "From" }
                         th { "State" }
                         th {

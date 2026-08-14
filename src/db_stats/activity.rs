@@ -49,12 +49,13 @@ pub struct ActivityStats {
     /// agent on `/crm` the SQL text running on `/billing`. The counts above are
     /// cluster-wide because a number leaks nothing; query text does.
     pub longest: Vec<LongRunningQuery>,
-    /// Every client backend on **this database**, busiest first — see
-    /// [`connections_sql`]. Scoped to this database for the same reason
+    /// Every client backend on **this database**, grouped by application — see
+    /// [`sort_by_application`]. Scoped to this database for the same reason
     /// [`Self::longest`] is: the row carries query text.
     ///
-    /// Truncated at [`CONNECTIONS_LIMIT`] rows. [`Self::in_this_db`] is the total it
-    /// was cut from, so a reader can always tell a complete list from a capped one.
+    /// Truncated at [`CONNECTIONS_LIMIT`] rows *before* that sort, by the interest
+    /// ordering in [`connections_sql`]. [`Self::in_this_db`] is the total it was cut
+    /// from, so a reader can always tell a complete list from a capped one.
     pub connections: Vec<BackendConnection>,
 }
 
@@ -313,7 +314,14 @@ const CONNECTION_QUERY_CHARS: usize = 512;
 /// Who is holding a connection, ordered so that the first rows are the ones worth
 /// looking at.
 ///
-/// # The ordering
+/// # The ordering picks the survivors, not the reading order
+///
+/// This is **not** the order the list is published in — [`sort_by_application`]
+/// groups it by application afterwards. This ordering exists to decide *which*
+/// [`CONNECTIONS_LIMIT`] rows survive the cap, and the two cannot be the same sort:
+/// ordering by name in SQL would make the cap drop every application alphabetically
+/// after some letter, which is the one way of choosing a hundred rows that carries
+/// no information at all.
 ///
 /// Active first, then `idle in transaction`, then everything else — and inside each
 /// group, longest in that state first. That is the order in which the rows answer a
@@ -321,10 +329,8 @@ const CONNECTION_QUERY_CHARS: usize = 512;
 /// transaction backend's age is how long it has been holding locks and pinning the
 /// xmin horizon, and an idle backend's age is only ever "this pool is oversized".
 /// Backends whose state is invisible to this account sort last, since nothing can be
-/// said about them at all.
-///
-/// It is also what makes [`CONNECTIONS_LIMIT`] safe to apply: the rows dropped by
-/// the cap are the least interesting ones, not an arbitrary hundred.
+/// said about them at all. So the rows the cap drops are the least interesting ones,
+/// not an arbitrary hundred.
 ///
 /// # Scope
 ///
@@ -386,6 +392,41 @@ LIMIT {limit}
     )
 }
 
+/// Sort key of one backend: its application, folded for case, and whether it has one
+/// at all.
+///
+/// The `bool` leads, so the nameless backends land at the end as a group. A client
+/// that did not set `application_name` is the least identifiable row in the list;
+/// its empty string would otherwise sort to the very top, in front of every
+/// connection that can be named.
+fn application_sort_key(connection: &BackendConnection) -> (bool, String) {
+    match connection.application_name.as_deref() {
+        Some(name) if !name.trim().is_empty() => (false, name.trim().to_lowercase()),
+        _ => (true, String::new()),
+    }
+}
+
+/// Groups the list by application, which is how it is read: an operator looking at a
+/// connection count that is too high is looking for *which service* is holding them,
+/// and that question is unanswerable while one pool's backends are scattered down a
+/// hundred rows.
+///
+/// Two properties do the work here, and neither is incidental:
+///
+/// - **The sort is stable, and keyed on the name alone.** [`connections_sql`] has
+///   already ordered the rows by how interesting they are, so leaving the rest of the
+///   key out preserves that order *inside* each application — a service's active
+///   backends still come before its idle ones, longest first.
+/// - **It runs after the query.** The cap is applied by the SQL ordering, so what a
+///   truncated list loses is still the dullest hundredth of it rather than the tail
+///   of the alphabet; see [`connections_sql`].
+///
+/// `sort_by_cached_key` rather than `sort_by_key`, because the key owns a lowercased
+/// `String`: computing it once per row beats computing it twice per comparison.
+fn sort_by_application(connections: &mut [BackendConnection]) {
+    connections.sort_by_cached_key(application_sort_key);
+}
+
 pub async fn collect_activity(
     postgres: &PostgresAccess,
     server_version_num: i32,
@@ -404,9 +445,11 @@ pub async fn collect_activity(
 
     let connections_sql = connections_sql(server_version_num);
 
-    let connections: Vec<BackendConnection> = postgres
+    let mut connections: Vec<BackendConnection> = postgres
         .query_typed("db_stats/connections", connections_sql.as_str(), timeout)
         .await?;
+
+    sort_by_application(&mut connections);
 
     let longest: Vec<LongRunningQuery> = postgres
         .query_typed("db_stats/longest_queries", LONGEST_SQL, timeout)
@@ -452,6 +495,78 @@ mod tests {
         // it by a handful of rows.
         assert!(connections_sql(PG10).contains("backend_type = 'client backend'"));
         assert!(!connections_sql(PG96).contains("backend_type"));
+    }
+
+    fn connection(pid: i32, application_name: Option<&str>) -> BackendConnection {
+        BackendConnection {
+            pid: Some(pid),
+            user_name: Some("postgres".to_string()),
+            application_name: application_name.map(|name| name.to_string()),
+            client_addr: None,
+            state: Some("idle".to_string()),
+            wait: None,
+            backend_start: None,
+            connected_secs: Some(10.0),
+            state_secs: Some(1.0),
+            running_secs: None,
+            query: None,
+            is_collector: false,
+        }
+    }
+
+    fn pids(connections: &[BackendConnection]) -> Vec<i32> {
+        connections.iter().filter_map(|c| c.pid).collect()
+    }
+
+    #[test]
+    fn connections_are_grouped_by_application_whatever_the_case() {
+        let mut connections = vec![
+            connection(1, Some("trade-history-grpc")),
+            connection(2, Some("Account-Candles")),
+            connection(3, Some("trade-history-grpc")),
+            connection(4, Some("accumulator-grpc")),
+        ];
+
+        sort_by_application(&mut connections);
+
+        // "Account-Candles" before "accumulator-grpc" — folding the case is what
+        // stops one capitalised client from being filed under its own letter.
+        assert_eq!(pids(&connections), vec![2, 4, 1, 3]);
+    }
+
+    #[test]
+    fn a_client_with_no_application_name_sorts_last_not_first() {
+        // Its name is the empty string, which would otherwise put the least
+        // identifiable rows in the list at the top of it.
+        let mut connections = vec![
+            connection(1, None),
+            connection(2, Some("mt-alerts-engine")),
+            connection(3, Some("")),
+            connection(4, Some("   ")),
+        ];
+
+        sort_by_application(&mut connections);
+
+        assert_eq!(pids(&connections), vec![2, 1, 3, 4]);
+    }
+
+    #[test]
+    fn the_interest_ordering_survives_inside_one_application() {
+        // The query returns a pool's backends busiest-first; sorting on the name
+        // alone, with a stable sort, is what keeps them that way. Were this sort
+        // keyed on anything else too, an application's active backend could end up
+        // below its idle ones.
+        let mut connections = vec![
+            connection(10, Some("api")),
+            connection(11, Some("worker")),
+            connection(12, Some("api")),
+            connection(13, Some("worker")),
+            connection(14, Some("api")),
+        ];
+
+        sort_by_application(&mut connections);
+
+        assert_eq!(pids(&connections), vec![10, 12, 14, 11, 13]);
     }
 
     #[test]

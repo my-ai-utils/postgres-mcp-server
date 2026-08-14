@@ -286,12 +286,22 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn who(&self) -> String {
-        let user = self.user_name.as_deref().unwrap_or(fmt::NONE);
-
+    /// The application the client named itself as — the column the list is sorted
+    /// on, which is why it gets one of its own instead of trailing the user name.
+    ///
+    /// A client that set no `application_name` renders as `—`: the server groups
+    /// those together at the end of the list.
+    pub fn application_label(&self) -> &str {
         match self.application_name.as_deref() {
-            Some(app) if !app.trim().is_empty() => format!("{} · {}", user, app),
-            _ => user.to_string(),
+            Some(app) if !app.trim().is_empty() => app,
+            _ => fmt::NONE,
+        }
+    }
+
+    pub fn user_label(&self) -> &str {
+        match self.user_name.as_deref() {
+            Some(user) if !user.trim().is_empty() => user,
+            _ => fmt::NONE,
         }
     }
 
@@ -359,9 +369,10 @@ pub struct Activity {
     pub state_unknown: Option<i64>,
     pub max_connections: Option<i64>,
     pub longest: Vec<LongQuery>,
-    /// Every client backend on this database, busiest first. Capped by the server at
-    /// 100 rows, which is what [`Activity::connections_subtitle`] compares against
-    /// `in_this_db` to detect.
+    /// Every client backend on this database, grouped by application and busiest
+    /// first inside each. Ordered by the server — the page renders the list as it
+    /// arrives. Capped there at 100 rows, which is what
+    /// [`Activity::connections_subtitle`] compares against `in_this_db` to detect.
     pub connections: Vec<Connection>,
 }
 

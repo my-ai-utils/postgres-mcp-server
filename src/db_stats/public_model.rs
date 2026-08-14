@@ -183,9 +183,12 @@ pub struct ActivityModel {
     pub max_connections: Option<i64>,
     // Longest-running active statements on THIS database only, longest first.
     pub longest: Vec<LongQueryModel>,
-    // Every client backend on THIS database, busiest first: active, then idle in
-    // transaction, then idle — each group longest-in-state first. Capped at 100
-    // rows, which `inThisDb` is the total for.
+    // Every client backend on THIS database, grouped by applicationName (the ones
+    // that set none come last), and inside each application the busiest first:
+    // active, then idle in transaction, then idle, each longest-in-state first.
+    // Capped at 100 rows — by that second ordering, before the grouping, so a cut
+    // list loses its dullest rows and not the tail of the alphabet. `inThisDb` is
+    // the total it was cut from.
     pub connections: Vec<ConnectionModel>,
 }
 
